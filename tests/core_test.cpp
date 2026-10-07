@@ -66,6 +66,17 @@ static void completerTests() {
     assert(SqlCompleter::joinsOn("SELECT * FROM orders", s, "public", "users", "id").empty());
     j = SqlCompleter::joinsOn("SELECT * FROM orders WHERE total > 0", s, "public", "orders", "user_id"); // FK: parent
     assert(j.size() == 1 && j[0].sql == "SELECT * FROM orders JOIN users u ON u.id = orders.user_id WHERE total > 0");
+    // filter: WHERE added or ANDed, OR kept together, column qualified only when several tables
+    auto f = [&](const std::string& sql, const std::string& col, const std::string& op, const std::string& v) {
+        return SqlCompleter::addFilter(sql, s, "public", "orders", col, op, v);
+    };
+    assert(f("SELECT * FROM orders LIMIT 100;", "total", ">", "5") == "SELECT * FROM orders WHERE total > '5' LIMIT 100;");
+    assert(f("SELECT * FROM orders", "id", "IS NULL", "") == "SELECT * FROM orders WHERE id IS NULL");
+    assert(f("SELECT * FROM orders WHERE a = 1 OR b = 2\nORDER BY id", "id", "IN", "1, 2") ==
+           "SELECT * FROM orders WHERE (a = 1 OR b = 2) AND id IN ('1', '2')\nORDER BY id");
+    assert(f("SELECT * FROM users u JOIN orders o ON o.user_id = u.id WHERE u.id = 1", "total", "contains", "it's") ==
+           "SELECT * FROM users u JOIN orders o ON o.user_id = u.id WHERE u.id = 1 AND o.total::text ILIKE '%it''s%'");
+    assert(f("SELECT * FROM users", "id", "=", "1").empty());
     r = comp("SELECT * FROM mix", s);
     assert(r.items.size() == 1 && r.items[0].label == "\"Mixed Case\"");
 

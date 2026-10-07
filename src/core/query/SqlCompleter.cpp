@@ -554,33 +554,70 @@ std::string tableName(const std::string& schema, const std::string& name) {
     return (schema == "public" ? "" : quoteIdent(schema) + ".") + quoteIdent(name);
 }
 
-std::vector<Join> joinsOn(const std::string& sql, const SchemaInfo& schema, const std::string& tableSchema,
-                          const std::string& table, const std::string& column) {
-    std::vector<Join> out;
-    std::vector<Token> toks;
-    for (auto& t : tokenize(sql))
-        if (t.kind != Token::Comment) toks.push_back(t);
-    // ponytail: first reference to the table in the text; several statements on it pick the first
-    auto refs = findRefs(toks, schema);
-    auto ref = std::find_if(refs.begin(), refs.end(),
-                            [&](const Ref& r) { return r.table && sameTable(*r.table, tableSchema, table); });
-    if (ref == refs.end()) return out;
+namespace {
 
-    // end of the FROM clause: the first top-level clause keyword, ; or ) after the table
-    static const std::set<std::string> clauseEnd = {"WHERE", "GROUP",  "HAVING",    "ORDER",  "LIMIT",
-                                                    "OFFSET", "UNION", "INTERSECT", "EXCEPT", "WINDOW",
-                                                    "FETCH", "FOR",    "RETURNING"};
-    size_t i = 0;
-    while (toks[i].pos != ref->pos) ++i;
-    int depth = 0;
-    for (; i < toks.size(); ++i) {
+// sql without comments, and the first reference to a table in it
+struct Located {
+    std::vector<Token> toks;
+    std::vector<Ref> refs;
+    const Ref* ref = nullptr;
+    size_t tok = 0; // index of ref's first token
+};
+// ponytail: first reference to the table in the text; several statements on it pick the first
+Located locate(const std::string& sql, const SchemaInfo& schema, const std::string& tableSchema,
+               const std::string& table) {
+    Located l;
+    for (auto& t : tokenize(sql))
+        if (t.kind != Token::Comment) l.toks.push_back(t);
+    l.refs = findRefs(l.toks, schema);
+    for (auto& r : l.refs)
+        if (r.table && sameTable(*r.table, tableSchema, table)) {
+            l.ref = &r;
+            break;
+        }
+    if (l.ref)
+        while (l.toks[l.tok].pos != l.ref->pos) ++l.tok;
+    return l;
+}
+
+// The first top-level clause keyword, ; or ) at or after toks[i] (toks.size() when none): where a
+// FROM list or WHERE condition starting before it ends.
+size_t clauseEnd(const std::vector<Token>& toks, size_t i) {
+    static const std::set<std::string> ends = {"WHERE",  "GROUP", "HAVING",    "ORDER",  "LIMIT",
+                                               "OFFSET", "UNION", "INTERSECT", "EXCEPT", "WINDOW",
+                                               "FETCH",  "FOR",   "RETURNING"};
+    for (int depth = 0; i < toks.size(); ++i) {
         const auto& t = toks[i];
         if (t.punct('(')) ++depth;
         else if (t.punct(')') && --depth < 0) break;
-        else if (depth == 0 && (t.punct(';') || (t.kind == Token::Word && clauseEnd.count(t.upper)))) break;
+        else if (depth == 0 && (t.punct(';') || (t.kind == Token::Word && ends.count(t.upper)))) break;
     }
-    bool atEnd = i == toks.size();
-    size_t at = atEnd ? toks.back().end : toks[i].pos;
+    return i;
+}
+
+// sql with text put before toks[i], or after the last token when i is past the end
+std::string insertBefore(const std::string& sql, const std::vector<Token>& toks, size_t i, const std::string& text) {
+    if (i == toks.size()) return sql.substr(0, toks.back().end) + " " + text + sql.substr(toks.back().end);
+    size_t at = toks[i].pos;
+    return sql.substr(0, at) + text + (sql[at - 1] == '\n' ? "\n" : " ") + sql.substr(at);
+}
+
+std::string literal(const std::string& v) {
+    std::string out = "'";
+    for (char c : v) out += c == '\'' ? std::string("''") : std::string(1, c);
+    return out + "'";
+}
+
+} // namespace
+
+std::vector<Join> joinsOn(const std::string& sql, const SchemaInfo& schema, const std::string& tableSchema,
+                          const std::string& table, const std::string& column) {
+    std::vector<Join> out;
+    auto l = locate(sql, schema, tableSchema, table);
+    if (!l.ref) return out;
+    const auto& refs = l.refs;
+    const Ref* ref = l.ref;
+    size_t end = clauseEnd(l.toks, l.tok);
 
     for (auto& fk : schema.foreignKeys)
         for (bool refIsFrom : {true, false}) { // FK column: its parent table; PK column: the referencing tables
@@ -595,10 +632,58 @@ std::vector<Join> joinsOn(const std::string& sql, const SchemaInfo& schema, cons
             std::string alias = makeAlias(other->name, refs);
             std::string join =
                 "JOIN " + tableName(*other) + " " + alias + " ON " + condition(fk, refIsFrom, ref->handle(), alias);
-            std::string text = atEnd ? " " + join : join + (sql[at - 1] == '\n' ? "\n" : " ");
-            out.push_back({join, sql.substr(0, at) + text + sql.substr(at)});
+            out.push_back({join, insertBefore(sql, l.toks, end, join)});
         }
     return out;
+}
+
+std::string addFilter(const std::string& sql, const SchemaInfo& schema, const std::string& tableSchema,
+                      const std::string& table, const std::string& column, const std::string& op,
+                      const std::string& value) {
+    auto l = locate(sql, schema, tableSchema, table);
+    if (!l.ref) return {};
+    const auto& toks = l.toks;
+    // qualify the column only when its statement names several tables
+    auto statement = [&](size_t pos) {
+        return std::count_if(toks.begin(), toks.end(), [&](const Token& t) { return t.punct(';') && t.pos < pos; });
+    };
+    bool several = std::count_if(l.refs.begin(), l.refs.end(),
+                                 [&](const Ref& r) { return statement(r.pos) == statement(l.ref->pos); }) > 1;
+    std::string col = (several ? l.ref->handle() + "." : "") + quoteIdent(column);
+
+    std::string test;
+    if (op == "IS NULL" || op == "IS NOT NULL") test = col + " " + op;
+    else if (op == "contains") test = col + "::text ILIKE " + literal("%" + value + "%");
+    else if (op == "starts with") test = col + "::text ILIKE " + literal(value + "%");
+    else if (op == "IN") {
+        std::string list;
+        for (size_t start = 0;;) {
+            size_t comma = value.find(',', start);
+            std::string item = value.substr(start, comma - start);
+            item.erase(0, item.find_first_not_of(' '));
+            item.erase(item.find_last_not_of(' ') + 1);
+            list += (list.empty() ? "" : ", ") + literal(item);
+            if (comma == std::string::npos) break;
+            start = comma + 1;
+        }
+        test = col + " IN (" + list + ")";
+    } else {
+        test = col + " " + op + " " + literal(value); // the literal takes the column's type: id = '5' works
+    }
+
+    size_t where = clauseEnd(toks, l.tok);
+    if (where == toks.size() || !toks[where].is("WHERE")) return insertBefore(sql, toks, where, "WHERE " + test);
+    size_t end = clauseEnd(toks, where + 1);
+    if (end == where + 1) return {}; // "WHERE" with nothing after it
+    bool hasOr = false;
+    int depth = 0;
+    for (size_t i = where + 1; i < end; ++i) {
+        depth += toks[i].punct('(') - toks[i].punct(')');
+        hasOr = hasOr || (depth == 0 && toks[i].is("OR"));
+    }
+    size_t condFrom = toks[where + 1].pos, condTo = toks[end - 1].end;
+    std::string cond = sql.substr(condFrom, condTo - condFrom);
+    return sql.substr(0, condFrom) + (hasOr ? "(" + cond + ")" : cond) + " AND " + test + sql.substr(condTo);
 }
 
 std::vector<std::pair<size_t, size_t>> unknownNames(const std::string& sql, const SchemaInfo& schema) {

@@ -42,4 +42,11 @@ struct Join {
 std::vector<Join> joinsOn(const std::string& sql, const SchemaInfo& schema, const std::string& tableSchema,
                           const std::string& table, const std::string& column);
 
+// sql with "column op value" ANDed into the WHERE of the statement that names table (WHERE added when
+// missing). op: = <> < > <= >= contains, starts with, IN (value comma-separated), IS NULL, IS NOT NULL.
+// Values are quoted literals, so they take the column's type. Empty when sql doesn't name table.
+std::string addFilter(const std::string& sql, const SchemaInfo& schema, const std::string& tableSchema,
+                      const std::string& table, const std::string& column, const std::string& op,
+                      const std::string& value);
+
 }

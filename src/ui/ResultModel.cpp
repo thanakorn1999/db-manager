@@ -98,6 +98,7 @@ void ResultModel::setResult(ResultSet rs) {
     editInserted_.clear();
     edits_.clear();
     deleted_.clear();
+    undo_.clear();
     endResetModel();
 }
 
@@ -205,10 +206,37 @@ bool ResultModel::setData(const QModelIndex& index, const QVariant& v, int role)
     std::string s = v.toString().toStdString();
     // an editor opened on NULL and closed untouched hands back "": keep the NULL
     if (!value(index.row(), index.column()) && s.empty()) return false;
-    return store(index, s);
+    remember();
+    if (store(index, s)) return true;
+    if (!hook_) undo_.pop_back(); // nothing changed
+    return false;
 }
 
-void ResultModel::setNull(const QModelIndex& index) { store(index, std::nullopt); }
+void ResultModel::setNull(const QModelIndexList& indexes) {
+    remember();
+    bool changed = false;
+    for (auto& i : indexes) changed |= store(i, std::nullopt);
+    if (!changed && !hook_) undo_.pop_back();
+}
+
+void ResultModel::remember() {
+    if (!hook_) undo_.push_back({edits_, deleted_, rs_.rows.size()}); // immediate mode: already written
+}
+
+bool ResultModel::undo() {
+    if (undo_.empty()) return false;
+    auto s = std::move(undo_.back());
+    undo_.pop_back();
+    if (s.rows < rs_.rows.size()) { // only + Row adds rows
+        beginRemoveRows({}, int(s.rows), int(rs_.rows.size()) - 1);
+        rs_.rows.resize(s.rows);
+        endRemoveRows();
+    }
+    edits_ = std::move(s.edits);
+    deleted_ = std::move(s.deleted);
+    if (rowCount() > 0) emit dataChanged(index(0, 0), index(rowCount() - 1, columnCount() - 1));
+    return true;
+}
 
 bool ResultModel::store(const QModelIndex& index, const std::optional<std::string>& v) {
     int r = index.row(), c = index.column();
@@ -226,6 +254,7 @@ bool ResultModel::store(const QModelIndex& index, const std::optional<std::strin
 }
 
 int ResultModel::appendRow() {
+    remember();
     int r = int(rs_.rows.size());
     beginInsertRows({}, r, r);
     rs_.rows.emplace_back(rs_.columns.size(), std::nullopt);
@@ -233,9 +262,13 @@ int ResultModel::appendRow() {
     return r;
 }
 
-void ResultModel::toggleDeleted(int row) {
-    if (!deleted_.erase(row)) deleted_.insert(row);
-    emit dataChanged(index(row, 0), index(row, columnCount() - 1));
+void ResultModel::toggleDeleted(const std::set<int>& rows) {
+    if (rows.empty()) return;
+    remember();
+    for (int row : rows) {
+        if (!deleted_.erase(row)) deleted_.insert(row);
+        emit dataChanged(index(row, 0), index(row, columnCount() - 1));
+    }
 }
 
 std::vector<ResultModel::RowChange> ResultModel::changes() const {
@@ -257,6 +290,7 @@ void ResultModel::discard() {
     rs_.rows.resize(originalRows_);
     edits_.clear();
     deleted_.clear();
+    undo_.clear();
     endResetModel();
 }
 

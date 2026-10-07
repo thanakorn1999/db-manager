@@ -8,7 +8,9 @@
 #include <QWidget>
 
 class QAction;
+class QComboBox;
 class QCompleter;
+class QLineEdit;
 class QStandardItemModel;
 class QLabel;
 class QPlainTextEdit;
@@ -28,6 +30,12 @@ public:
 
 private:
     void runQuery();
+    // replaces the editor text as one undo step
+    void setSql(const QString& sql);
+    // ANDs "column op value" into the SQL's WHERE and runs it (see SqlCompleter::addFilter)
+    void applyFilter(int column, const QString& op, const QString& value);
+    void showFilterBar(int column);
+    void fillFilterColumns();
     void execute(const QString& sql, const QString& note = {});
     void save();
     void setRunning(bool running);
@@ -49,11 +57,19 @@ private:
     QLabel* status_;
     QAction* run_;
     QAction* cancel_;
+    QAction* rerun_;
     QAction* addRow_;
     QAction* deleteRows_;
     QAction* setNull_;
     QAction* save_;
     QAction* discard_;
+    QAction* undo_;
+    QWidget* filterBar_;
+    QComboBox* filterColumn_; // result column index as item data
+    QComboBox* filterOp_;
+    QLineEdit* filterValue_;
+    QAction* clearFilter_;
+    QString filterBase_; // the SQL before the first filter; null = not filtered
     bool running_ = false;
     QString lastSql_;
     EditTarget target_;

@@ -137,6 +137,7 @@ MainWindow::MainWindow() {
     newConn->setShortcut(QKeySequence::New);
     sql->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_T));
     refresh->setShortcut(QKeySequence::Refresh);
+    refresh->setShortcutContext(Qt::WidgetShortcut); // tree only: ⌘R in a SQL tab re-runs its query
     auto* setIcon = new QAction("Set Icon…", this);
     connect(setIcon, &QAction::triggered, this, [this] {
         auto* item = selectedItem();

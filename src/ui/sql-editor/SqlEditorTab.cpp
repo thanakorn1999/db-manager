@@ -10,7 +10,9 @@
 #include <QStyledItemDelegate>
 #include <QToolTip>
 #include <QAction>
+#include <QComboBox>
 #include <QCompleter>
+#include <QLineEdit>
 #include <QKeyEvent>
 #include <QScrollBar>
 #include <QStandardItemModel>
@@ -247,9 +249,7 @@ SqlEditorTab::SqlEditorTab(const ConnectionConfig& cfg, const QString& sql, bool
         for (auto& j : joins)
             connect(menu.addAction(QString::fromStdString(j.label)), &QAction::triggered, this,
                     [this, sql = QString::fromStdString(j.sql)] {
-                        auto c = editor_->textCursor();
-                        c.select(QTextCursor::Document);
-                        c.insertText(sql); // one undo step
+                        setSql(sql);
                         editor_->setFocus();
                     });
         if (joins.empty()) menu.addAction("No related table")->setEnabled(false);
@@ -270,6 +270,10 @@ SqlEditorTab::SqlEditorTab(const ConnectionConfig& cfg, const QString& sql, bool
     run_ = toolbar->addAction("▶ Run");
     run_->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Return));
     run_->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+    rerun_ = toolbar->addAction("↻ Re-run");
+    rerun_->setToolTip("Run the last query again (⌘R)");
+    rerun_->setShortcut(QKeySequence::Refresh);
+    rerun_->setShortcutContext(Qt::WidgetWithChildrenShortcut);
     cancel_ = toolbar->addAction("■ Cancel");
     cancel_->setEnabled(false);
     cancel_->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Period));
@@ -304,16 +308,103 @@ SqlEditorTab::SqlEditorTab(const ConnectionConfig& cfg, const QString& sql, bool
     setNull_ = toolbar->addAction("Set NULL");
     save_ = toolbar->addAction("Save");
     save_->setShortcut(QKeySequence::Save);
+    undo_ = toolbar->addAction("↶ Undo");
+    undo_->setToolTip("Undo the last grid change (⌘Z)");
+    undo_->setShortcut(QKeySequence::Undo);
+    undo_->setShortcutContext(Qt::WidgetShortcut); // grid only: the SQL editor has its own ⌘Z
+    table_->addAction(undo_);
     discard_ = toolbar->addAction("Discard");
     toolbar->addSeparator();
     auto* exportResult = toolbar->addAction("Export…");
     exportResult->setToolTip("Save the result grid as CSV or INSERT statements");
     save_->setShortcutContext(Qt::WidgetWithChildrenShortcut);
-    addActions({run_, cancel_, save_}); // shortcut context is this tab, not just the toolbar
+    addActions({run_, rerun_, cancel_, save_}); // shortcut context is this tab, not just the toolbar
+
+    // filter bar (⌘F) over the grid: column / operator / value, written into the SQL's WHERE
+    filterBar_ = new QWidget;
+    filterColumn_ = new QComboBox;
+    filterOp_ = new QComboBox;
+    filterOp_->addItems({"=", "<>", "<", ">", "<=", ">=", "contains", "starts with", "IN", "IS NULL", "IS NOT NULL"});
+    filterValue_ = new QLineEdit;
+    filterValue_->setPlaceholderText("value (IN: a, b, c) — ↵ apply, Esc close");
+    auto* filterBarTools = new QToolBar;
+    auto* applyFilterAct = filterBarTools->addAction("Filter");
+    clearFilter_ = filterBarTools->addAction("Clear");
+    clearFilter_->setToolTip("Back to the SQL before filtering");
+    clearFilter_->setEnabled(false);
+    auto* closeFilter = filterBarTools->addAction("✕");
+    closeFilter->setShortcut(Qt::Key_Escape);
+    closeFilter->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+    filterBar_->addAction(closeFilter);
+    auto* filterLayout = new QHBoxLayout(filterBar_);
+    filterLayout->setContentsMargins(4, 2, 4, 2);
+    filterLayout->addWidget(filterColumn_);
+    filterLayout->addWidget(filterOp_);
+    filterLayout->addWidget(filterValue_, 1);
+    filterLayout->addWidget(filterBarTools);
+    filterBar_->hide();
+    auto* find = new QAction("Filter", this);
+    find->setShortcut(QKeySequence::Find);
+    find->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+    addAction(find);
+    connect(find, &QAction::triggered, this, [this] { showFilterBar(table_->currentIndex().column()); });
+    auto applyFromBar = [this] {
+        if (filterColumn_->currentIndex() >= 0)
+            applyFilter(filterColumn_->currentData().toInt(), filterOp_->currentText(), filterValue_->text());
+    };
+    connect(applyFilterAct, &QAction::triggered, this, applyFromBar);
+    connect(filterValue_, &QLineEdit::returnPressed, this, applyFromBar);
+    connect(filterOp_, &QComboBox::currentTextChanged, this,
+            [this](const QString& op) { filterValue_->setEnabled(!op.startsWith("IS ")); });
+    connect(closeFilter, &QAction::triggered, this, [this] {
+        filterBar_->hide();
+        table_->setFocus();
+    });
+    connect(clearFilter_, &QAction::triggered, this, [this] {
+        if (filterBase_.isNull() || !confirmDiscard()) return;
+        setSql(filterBase_);
+        filterBase_ = QString();
+        clearFilter_->setEnabled(false);
+        execute(editor_->toPlainText().trimmed());
+    });
+
+    // right-click a cell: filter on its value
+    table_->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(table_, &QWidget::customContextMenuRequested, this, [this](QPoint pos) {
+        auto index = table_->indexAt(pos);
+        const auto& rs = model_->result();
+        if (!index.isValid() || size_t(index.column()) >= rs.sources.size() || rs.sources[index.column()].table.empty())
+            return;
+        int col = index.column();
+        QString name = QString::fromStdString(rs.columns[col]);
+        QMenu menu;
+        auto add = [&](const QString& label, const QString& op, const QString& value) {
+            connect(menu.addAction(label), &QAction::triggered, this, [=, this] { applyFilter(col, op, value); });
+        };
+        if (model_->isNull(index)) {
+            add(name + " IS NULL", "IS NULL", {});
+            add(name + " IS NOT NULL", "IS NOT NULL", {});
+        } else {
+            QString v = index.data(Qt::EditRole).toString();
+            QString shown = fontMetrics().elidedText(v.simplified(), Qt::ElideRight, 200);
+            add(name + " = " + shown, "=", v);
+            add(name + " <> " + shown, "<>", v);
+        }
+        menu.addSeparator();
+        connect(menu.addAction("Filter…\t⌘F"), &QAction::triggered, this, [this, col] { showFilterBar(col); });
+        menu.exec(table_->viewport()->mapToGlobal(pos));
+    });
+
+    auto* grid = new QWidget;
+    auto* gridLayout = new QVBoxLayout(grid);
+    gridLayout->setContentsMargins(0, 0, 0, 0);
+    gridLayout->setSpacing(0);
+    gridLayout->addWidget(filterBar_);
+    gridLayout->addWidget(table_);
 
     auto* splitter = new QSplitter(Qt::Vertical);
     splitter->addWidget(editor_);
-    splitter->addWidget(table_);
+    splitter->addWidget(grid);
     splitter->setStretchFactor(1, 2);
 
     auto* layout = new QVBoxLayout(this);
@@ -323,6 +414,9 @@ SqlEditorTab::SqlEditorTab(const ConnectionConfig& cfg, const QString& sql, bool
     layout->addWidget(status_);
 
     connect(run_, &QAction::triggered, this, &SqlEditorTab::runQuery);
+    connect(rerun_, &QAction::triggered, this, [this] {
+        if (!lastSql_.isEmpty() && confirmDiscard()) execute(lastSql_);
+    });
     connect(cancel_, &QAction::triggered, this, [this] { session_.cancel(); });
     connect(addRow_, &QAction::triggered, this, [this] {
         int r = model_->appendRow();
@@ -332,10 +426,10 @@ SqlEditorTab::SqlEditorTab(const ConnectionConfig& cfg, const QString& sql, bool
     connect(deleteRows_, &QAction::triggered, this, [this] {
         std::set<int> rows;
         for (auto& i : table_->selectionModel()->selectedIndexes()) rows.insert(i.row());
-        for (int r : rows) model_->toggleDeleted(r);
+        model_->toggleDeleted(rows);
     });
     connect(setNull_, &QAction::triggered, this, [this] {
-        for (auto& i : table_->selectionModel()->selectedIndexes()) model_->setNull(i);
+        model_->setNull(table_->selectionModel()->selectedIndexes());
     });
     connect(save_, &QAction::triggered, this, &SqlEditorTab::save);
     connect(exportResult, &QAction::triggered, this, [this] {
@@ -384,9 +478,11 @@ SqlEditorTab::SqlEditorTab(const ConnectionConfig& cfg, const QString& sql, bool
     connect(lint, &QTimer::timeout, this, &SqlEditorTab::updateWarnings);
     connect(editor_, &QPlainTextEdit::textChanged, lint, qOverload<>(&QTimer::start));
     connect(discard_, &QAction::triggered, model_, &ResultModel::discard);
+    connect(undo_, &QAction::triggered, model_, &ResultModel::undo);
     connect(model_, &QAbstractItemModel::dataChanged, this, &SqlEditorTab::updateEditActions);
     connect(model_, &QAbstractItemModel::modelReset, this, &SqlEditorTab::updateEditActions);
     connect(model_, &QAbstractItemModel::rowsInserted, this, &SqlEditorTab::updateEditActions);
+    connect(model_, &QAbstractItemModel::rowsRemoved, this, &SqlEditorTab::updateEditActions);
     updateEditActions();
     if (runNow) runQuery();
 }
@@ -394,6 +490,7 @@ SqlEditorTab::SqlEditorTab(const ConnectionConfig& cfg, const QString& sql, bool
 void SqlEditorTab::setRunning(bool running) {
     running_ = running;
     run_->setEnabled(!running);
+    rerun_->setEnabled(!running);
     cancel_->setEnabled(running);
     updateEditActions();
 }
@@ -404,6 +501,7 @@ void SqlEditorTab::updateEditActions() {
     for (auto* a : {addRow_, deleteRows_, setNull_}) a->setEnabled(editable);
     save_->setEnabled(dirty);
     discard_->setEnabled(dirty);
+    undo_->setEnabled(editable && model_->canUndo());
 }
 
 void SqlEditorTab::showError(const QString& msg) {
@@ -422,7 +520,53 @@ void SqlEditorTab::runQuery() {
     QString sql = (cursor.hasSelection() ? cursor.selectedText().replace(QChar(0x2029), '\n')
                                          : editor_->toPlainText()).trimmed();
     if (sql.isEmpty() || !confirmDiscard()) return;
+    filterBase_ = QString(); // SQL run by hand: Clear mustn't bring back an older text
+    clearFilter_->setEnabled(false);
     execute(sql);
+}
+
+void SqlEditorTab::setSql(const QString& sql) {
+    auto c = editor_->textCursor();
+    c.select(QTextCursor::Document);
+    c.insertText(sql);
+    editor_->setTextCursor(c);
+}
+
+void SqlEditorTab::fillFilterColumns() {
+    QString current = filterColumn_->currentText();
+    filterColumn_->clear();
+    const auto& rs = model_->result();
+    for (size_t c = 0; c < rs.sources.size(); ++c) {
+        if (rs.sources[c].table.empty()) continue; // computed columns can't go in WHERE by their result name
+        QString name = QString::fromStdString(rs.columns[c]);
+        if (std::count(rs.columns.begin(), rs.columns.end(), rs.columns[c]) > 1) // JOIN: id and id
+            name += " (" + QString::fromStdString(rs.sources[c].table) + ")";
+        filterColumn_->addItem(name, int(c));
+    }
+    filterColumn_->setCurrentIndex(std::max(0, filterColumn_->findText(current)));
+}
+
+void SqlEditorTab::showFilterBar(int column) {
+    if (int i = filterColumn_->findData(column); i >= 0) filterColumn_->setCurrentIndex(i);
+    filterBar_->show();
+    filterValue_->setFocus();
+    filterValue_->selectAll();
+}
+
+void SqlEditorTab::applyFilter(int column, const QString& op, const QString& value) {
+    const auto& src = model_->result().sources[column];
+    QString text = editor_->toPlainText();
+    std::string sql = SqlCompleter::addFilter(text.toStdString(), schema_, src.schema, src.table, src.column,
+                                              op.toStdString(), value.toStdString());
+    if (sql.empty()) {
+        showError(QString("Can't filter: the SQL doesn't name %1 in a FROM / JOIN").arg(QString::fromStdString(src.table)));
+        return;
+    }
+    if (!confirmDiscard()) return;
+    if (filterBase_.isNull()) filterBase_ = text;
+    clearFilter_->setEnabled(true);
+    setSql(QString::fromStdString(sql));
+    execute(editor_->toPlainText().trimmed());
 }
 
 void SqlEditorTab::execute(const QString& sql, const QString& note) {
@@ -452,6 +596,7 @@ void SqlEditorTab::execute(const QString& sql, const QString& note) {
             static const QRegularExpression ddl("^(CREATE|ALTER|DROP|COMMENT|RENAME)\\b");
             if (ddl.match(QString::fromStdString(rs.status)).hasMatch()) loadSchema();
             model_->setResult(rs);
+            fillFilterColumns();
             if (target_.readOnlyReason.empty()) {
                 std::vector<bool> cols;
                 for (auto& c : target_.columns) cols.push_back(!c.empty());

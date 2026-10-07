@@ -53,11 +53,14 @@ public:
     void setCommitHook(CommitHook hook) { hook_ = std::move(hook); }
 
     int appendRow();
-    void toggleDeleted(int row);
-    void setNull(const QModelIndex& index);
+    void toggleDeleted(const std::set<int>& rows);
+    void setNull(const QModelIndexList& indexes);
     std::vector<RowChange> changes() const;
     bool hasChanges() const { return !changes().empty(); }
     void discard();
+    // Steps back one pending change (an edit, Set NULL, + Row, − Row); false when there's none.
+    bool undo();
+    bool canUndo() const { return !undo_.empty(); }
 
     Qt::ItemFlags flags(const QModelIndex& index) const override;
     bool setData(const QModelIndex& index, const QVariant& value, int role) override;
@@ -72,11 +75,19 @@ private:
     std::optional<Settings::CellRole> cellRole(int row, int col) const;
     const std::optional<std::string>& value(int row, int col) const;
     bool store(const QModelIndex& index, const std::optional<std::string>& v);
+    void remember();
+
+    struct Snapshot { // pending state before one user action
+        std::map<std::pair<int, int>, std::optional<std::string>> edits;
+        std::set<int> deleted;
+        size_t rows;
+    };
 
     ResultSet rs_;
     size_t originalRows_ = 0;
     std::vector<bool> editExisting_, editInserted_;
     std::map<std::pair<int, int>, std::optional<std::string>> edits_;
     std::set<int> deleted_;
+    std::vector<Snapshot> undo_; // ponytail: full copies of the pending edits; fine for hand-made changes
     CommitHook hook_;
 };
