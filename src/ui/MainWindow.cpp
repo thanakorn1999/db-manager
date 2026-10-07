@@ -1,0 +1,721 @@
+#include "MainWindow.h"
+
+#include "ui/Settings.h"
+#include "ui/TableIcons.h"
+#include "ui/connection/ConnectionDialog.h"
+#include "ui/connection/ConnectionStore.h"
+#include "ui/er-diagram/ErDiagram.h"
+#include "ui/ResultModel.h"
+#include "ui/redis/RedisTab.h"
+#include "ui/sql-editor/SqlEditorTab.h"
+
+#include <QApplication>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QDialogButtonBox>
+#include <QFormLayout>
+#include <QListWidget>
+#include <QPushButton>
+#include <QVBoxLayout>
+#include <QCloseEvent>
+#include <QDateTime>
+#include <QDir>
+#include <QFileDialog>
+#include <QProcess>
+#include <QStandardPaths>
+#include <QHeaderView>
+#include <QMenu>
+#include <QMessageBox>
+#include <QSplitter>
+#include <QStandardItemModel>
+#include <QStatusBar>
+#include <QStyle>
+#include <QTabWidget>
+#include <QToolBar>
+#include <QTreeView>
+
+namespace {
+enum Role { RoleKind = Qt::UserRole + 1, RoleConn, RoleDb, RoleSchema, RoleName, RoleToken };
+
+QString qs(const std::string& s) { return QString::fromStdString(s); }
+
+QString defaultDb(const ConnectionConfig& c) {
+    if (!c.database.empty()) return qs(c.database);
+    return c.type == DbType::Redis ? "0" : "postgres";
+}
+
+QStandardItem* makeItem(const QString& text, int kind, const QString& conn, const QString& db = {},
+                        const QString& schema = {}, const QString& name = {}) {
+    auto* item = new QStandardItem(text);
+    item->setEditable(false);
+    item->setData(kind, RoleKind);
+    item->setData(conn, RoleConn);
+    item->setData(db, RoleDb);
+    item->setData(schema, RoleSchema);
+    item->setData(name, RoleName);
+    return item;
+}
+}
+
+MainWindow::MainWindow() {
+    setWindowTitle("DB Manager");
+
+    model_ = new QStandardItemModel(this);
+    tree_ = new QTreeView;
+    tree_->setModel(model_);
+    tree_->setHeaderHidden(true);
+    // custom menu: right-click must first make the clicked row current (macOS doesn't),
+    // or the actions would hit whatever was selected before
+    tree_->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(tree_, &QWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+        if (auto idx = tree_->indexAt(pos); idx.isValid()) tree_->setCurrentIndex(idx);
+        QMenu::exec(tree_->actions(), tree_->viewport()->mapToGlobal(pos), nullptr, tree_);
+    });
+
+    tabs_ = new QTabWidget;
+    tabs_->setTabsClosable(true);
+    tabs_->setDocumentMode(true);
+    tabs_->setMovable(true);
+
+    auto* splitter = new QSplitter;
+    splitter->addWidget(tree_);
+    splitter->addWidget(tabs_);
+    splitter->setStretchFactor(1, 1);
+    splitter->setSizes({280, 920});
+    setCentralWidget(splitter);
+
+    auto* toolbar = addToolBar("Main");
+    toolbar->setMovable(false);
+    auto* newConn = toolbar->addAction(style()->standardIcon(QStyle::SP_FileDialogNewFolder), "New Connection");
+    auto* editConn = toolbar->addAction("Edit");
+    auto* delConn = toolbar->addAction("Delete");
+    toolbar->addSeparator();
+    auto* sql = toolbar->addAction("SQL Editor");
+    auto* er = new QAction("ER Diagram", this); // right-click menu only
+    auto* backupAct = new QAction("Backup (pg_dump)…", this);
+    auto* exportAct = new QAction("Export…", this);
+    auto* refresh = toolbar->addAction(style()->standardIcon(QStyle::SP_BrowserReload), "Refresh");
+    auto* disconnect = toolbar->addAction("Disconnect");
+    toolbar->addSeparator();
+    auto* settings = toolbar->addAction("Settings");
+    settings->setShortcut(QKeySequence::Preferences); // ⌘,
+    settings->setMenuRole(QAction::PreferencesRole);
+    connect(settings, &QAction::triggered, this, [this] { Settings::showDialog(this); });
+    newConn->setShortcut(QKeySequence::New);
+    sql->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_T));
+    refresh->setShortcut(QKeySequence::Refresh);
+    auto* setIcon = new QAction("Set Icon…", this);
+    connect(setIcon, &QAction::triggered, this, [this] {
+        auto* item = selectedItem();
+        if (!item || item->data(RoleKind).toInt() != PgRelation) {
+            statusBar()->showMessage("Select a table to set its icon", 3000);
+            return;
+        }
+        QString schema = item->data(RoleSchema).toString(), table = item->data(RoleName).toString();
+        if (!TableIcons::pick(this, schema, table)) return;
+        // same table may be open under several connections / databases
+        std::function<void(QStandardItem*)> update = [&](QStandardItem* it) {
+            for (int r = 0; r < it->rowCount(); ++r) {
+                auto* c = it->child(r);
+                if (c->data(RoleKind).toInt() == PgRelation && c->data(RoleSchema) == schema && c->data(RoleName) == table)
+                    c->setIcon(TableIcons::icon(schema, table));
+                update(c);
+            }
+        };
+        update(model_->invisibleRootItem());
+    });
+    tree_->addActions({sql, er, backupAct, exportAct, setIcon, refresh, disconnect, editConn, delConn});
+
+    connect(newConn, &QAction::triggered, this, &MainWindow::newConnection);
+    connect(editConn, &QAction::triggered, this, &MainWindow::editConnection);
+    connect(delConn, &QAction::triggered, this, &MainWindow::deleteConnection);
+    connect(sql, &QAction::triggered, this, &MainWindow::newSqlEditor);
+    connect(er, &QAction::triggered, this, &MainWindow::openErDiagram);
+    connect(backupAct, &QAction::triggered, this, &MainWindow::backup);
+    connect(exportAct, &QAction::triggered, this, &MainWindow::exportTable);
+    connect(refresh, &QAction::triggered, this, [this] {
+        if (auto* item = selectedItem(); item && item->hasChildren()) {
+            resetChildren(item);
+            if (tree_->isExpanded(item->index())) loadChildren(item);
+        }
+    });
+    connect(disconnect, &QAction::triggered, this, [this] {
+        auto* item = selectedItem();
+        if (!item) return;
+        while (item->parent()) item = item->parent();
+        dropSessions(item->data(RoleConn).toString());
+        tree_->collapse(item->index());
+        resetChildren(item);
+        statusBar()->showMessage("Disconnected " + item->text(), 3000);
+    });
+    connect(tree_, &QTreeView::expanded, this,
+            [this](const QModelIndex& idx) { loadChildren(model_->itemFromIndex(idx)); });
+    connect(tree_, &QTreeView::doubleClicked, this,
+            [this](const QModelIndex& idx) { activated(model_->itemFromIndex(idx)); });
+    connect(tabs_, &QTabWidget::tabCloseRequested, this, &MainWindow::closeTab);
+
+    // tab hotkeys (Qt maps Ctrl to ⌘ on macOS)
+    auto shortcut = [this](QList<QKeySequence> keys, auto fn) {
+        auto* a = new QAction(this);
+        a->setShortcuts(keys);
+        connect(a, &QAction::triggered, this, fn);
+        addAction(a);
+    };
+    shortcut(QKeySequence::keyBindings(QKeySequence::Close), [this] {
+        if (tabs_->count()) closeTab(tabs_->currentIndex());
+    });
+    auto step = [this](int d) {
+        if (int n = tabs_->count()) tabs_->setCurrentIndex((tabs_->currentIndex() + d + n) % n);
+    };
+    shortcut(QKeySequence::keyBindings(QKeySequence::NextChild) +
+                 QList<QKeySequence>{QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_BracketRight),
+                                     QKeySequence(Qt::META | Qt::Key_Tab)}, // ⌃⇥ (⌘⇥ is taken by macOS)
+             [step] { step(1); });
+    shortcut(QKeySequence::keyBindings(QKeySequence::PreviousChild) +
+                 QList<QKeySequence>{QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_BracketLeft),
+                                     QKeySequence(Qt::META | Qt::SHIFT | Qt::Key_Backtab)},
+             [step] { step(-1); });
+    for (int i = 1; i <= 9; ++i) // ⌘9 = last tab, like browsers
+        shortcut({QKeySequence(Qt::CTRL | Qt::Key(Qt::Key_0 + i))},
+                 [this, i] { tabs_->setCurrentIndex(i == 9 ? tabs_->count() - 1 : i - 1); });
+
+    for (auto& cfg : ConnectionStore::load()) addConnectionItem(cfg);
+    statusBar()->showMessage(model_->rowCount() ? "Ready" : "Create a connection to get started (⌘N)");
+}
+
+void MainWindow::closeTab(int i) {
+    auto* sql = dynamic_cast<SqlEditorTab*>(tabs_->widget(i));
+    if (sql && !sql->confirmDiscard()) return;
+    delete tabs_->widget(i);
+}
+
+void MainWindow::closeEvent(QCloseEvent* e) {
+    for (int i = 0; i < tabs_->count(); ++i) {
+        auto* sql = dynamic_cast<SqlEditorTab*>(tabs_->widget(i));
+        if (sql && !sql->confirmDiscard()) {
+            tabs_->setCurrentIndex(i);
+            e->ignore();
+            return;
+        }
+    }
+    e->accept();
+}
+
+QStandardItem* MainWindow::addConnectionItem(const ConnectionConfig& cfg) {
+    QString id = qs(cfg.id);
+    configs_[id] = cfg;
+    auto* item = makeItem(qs(cfg.name), Connection, id);
+    item->setIcon(style()->standardIcon(QStyle::SP_DriveNetIcon));
+    item->setToolTip(QString("%1 · %2:%3").arg(cfg.type == DbType::Redis ? "Redis" : "PostgreSQL",
+                                               qs(cfg.host)).arg(cfg.port));
+    model_->appendRow(item);
+    resetChildren(item);
+    return item;
+}
+
+QStandardItem* MainWindow::selectedItem() const { return model_->itemFromIndex(tree_->currentIndex()); }
+
+// Replaces children with a single placeholder; loadChildren() fills it on expand.
+void MainWindow::resetChildren(QStandardItem* item) {
+    item->removeRows(0, item->rowCount());
+    auto* ph = makeItem("Loading…", Placeholder, {});
+    ph->setEnabled(false);
+    ph->setData(0, RoleToken);
+    item->appendRow(ph);
+}
+
+void MainWindow::loadChildren(QStandardItem* item) {
+    if (!item || item->rowCount() != 1) return;
+    auto* ph = item->child(0);
+    if (ph->data(RoleKind).toInt() != Placeholder || ph->data(RoleToken).toInt() != 0) return;
+    int token = ++loadSeq_;
+    ph->setData(token, RoleToken);
+    ph->setText("Loading…");
+
+    QString conn = item->data(RoleConn).toString();
+    QString db = item->data(RoleDb).toString();
+    QString schema = item->data(RoleSchema).toString();
+    // item pointers may die while a query runs (delete/refresh); resolve through a persistent index
+    QPersistentModelIndex idx(item->index());
+    auto fail = [this, idx, token](const QString& msg) {
+        if (idx.isValid()) loadFailed(model_->itemFromIndex(idx), token, msg);
+    };
+    auto expandable = [this](QStandardItem* it) {
+        resetChildren(it);
+        return it;
+    };
+
+    const auto& cfg = configs_.at(conn);
+    switch (item->data(RoleKind).toInt()) {
+    case Connection:
+        if (cfg.type == DbType::Redis) {
+            redisSession(conn).run(
+                this, [](Redis& r) { return std::pair{r.databaseCount(), r.keyspace()}; },
+                [=, this](const std::pair<int, std::map<int, long long>>& res) {
+                    if (!idx.isValid()) return;
+                    QList<QStandardItem*> children;
+                    for (int i = 0; i < res.first; ++i) {
+                        auto it = res.second.find(i);
+                        QString text = QString("DB %1").arg(i);
+                        if (it != res.second.end()) text += QString("  (%1 keys)").arg(it->second);
+                        auto* c = makeItem(text, RedisDb, conn, QString::number(i));
+                        c->setIcon(style()->standardIcon(QStyle::SP_DirIcon));
+                        children << c;
+                    }
+                    fillChildren(model_->itemFromIndex(idx), token, children);
+                },
+                fail);
+        } else {
+            pgSession(conn, defaultDb(cfg)).run(
+                this, [](PostgreSQL& pg) { return pg.databases(); },
+                [=, this](const std::vector<std::string>& dbs) {
+                    if (!idx.isValid()) return;
+                    QList<QStandardItem*> children;
+                    for (auto& d : dbs) {
+                        auto* c = expandable(makeItem(qs(d), PgDatabase, conn, qs(d)));
+                        c->setIcon(style()->standardIcon(QStyle::SP_DirIcon));
+                        children << c;
+                    }
+                    fillChildren(model_->itemFromIndex(idx), token, children);
+                },
+                fail);
+        }
+        break;
+    case PgDatabase:
+        pgSession(conn, db).run(
+            this, [](PostgreSQL& pg) { return pg.schemas(); },
+            [=, this](const std::vector<std::string>& schemas) {
+                if (!idx.isValid()) return;
+                QList<QStandardItem*> children;
+                for (auto& s : schemas) {
+                    auto* c = expandable(makeItem(qs(s), PgSchema, conn, db, qs(s)));
+                    c->setIcon(style()->standardIcon(QStyle::SP_DirClosedIcon));
+                    children << c;
+                }
+                fillChildren(model_->itemFromIndex(idx), token, children);
+            },
+            fail);
+        break;
+    case PgSchema:
+        pgSession(conn, db).run(
+            this, [s = schema.toStdString()](PostgreSQL& pg) { return pg.relations(s); },
+            [=, this](const std::vector<std::pair<std::string, char>>& rels) {
+                if (!idx.isValid()) return;
+                static const std::map<char, QString> suffix = {
+                    {'v', " (view)"}, {'m', " (materialized view)"}, {'f', " (foreign)"}};
+                QList<QStandardItem*> children;
+                for (auto& [name, kind] : rels) {
+                    auto it = suffix.find(kind);
+                    auto* c = makeItem(qs(name) + (it != suffix.end() ? it->second : QString()), PgRelation,
+                                       conn, db, schema, qs(name));
+                    c->setIcon(TableIcons::icon(schema, qs(name)));
+                    children << c;
+                }
+                fillChildren(model_->itemFromIndex(idx), token, children);
+            },
+            fail);
+        break;
+    }
+}
+
+void MainWindow::fillChildren(QStandardItem* item, int token, QList<QStandardItem*> children) {
+    // stale reply (node was refreshed / reconnected meanwhile)
+    if (item->rowCount() != 1 || item->child(0)->data(RoleToken).toInt() != token) {
+        qDeleteAll(children);
+        return;
+    }
+    item->removeRows(0, item->rowCount());
+    if (children.isEmpty()) {
+        auto* empty = makeItem("(empty)", Placeholder, {});
+        empty->setEnabled(false);
+        empty->setData(-1, RoleToken); // never reloads by itself; use Refresh
+        children << empty;
+    }
+    item->appendRows(children);
+}
+
+void MainWindow::loadFailed(QStandardItem* item, int token, const QString& msg) {
+    if (item->rowCount() != 1 || item->child(0)->data(RoleToken).toInt() != token) return;
+    item->child(0)->setText("Error: " + msg.simplified());
+    item->child(0)->setToolTip(msg);
+    item->child(0)->setData(0, RoleToken); // collapse + expand (or Refresh) retries
+    statusBar()->showMessage(msg.simplified(), 8000);
+}
+
+void MainWindow::activated(QStandardItem* item) {
+    if (!item) return;
+    QString conn = item->data(RoleConn).toString();
+    switch (item->data(RoleKind).toInt()) {
+    case PgRelation:
+        openSqlEditor(conn, item->data(RoleDb).toString(),
+                      QString("SELECT * FROM %1.%2 LIMIT 100;")
+                          .arg(qs(PostgreSQL::quoteIdent(item->data(RoleSchema).toString().toStdString())),
+                               qs(PostgreSQL::quoteIdent(item->data(RoleName).toString().toStdString()))),
+                      true);
+        break;
+    case RedisDb: openRedis(conn, item->data(RoleDb).toInt()); break;
+    }
+}
+
+void MainWindow::newConnection() {
+    ConnectionDialog dlg(ConnectionConfig{}, this);
+    if (dlg.exec() != QDialog::Accepted) return;
+    auto cfg = dlg.config();
+    try {
+        ConnectionStore::save(cfg);
+    } catch (const std::exception& e) {
+        QMessageBox::warning(this, "Save failed", e.what());
+        return;
+    }
+    passwords_[qs(cfg.id)] = cfg.password;
+    cfg.password.clear();
+    tree_->setCurrentIndex(addConnectionItem(cfg)->index());
+}
+
+void MainWindow::editConnection() {
+    auto* item = selectedItem();
+    if (!item) return;
+    while (item->parent()) item = item->parent();
+    QString conn = item->data(RoleConn).toString();
+
+    ConnectionDialog dlg(configFor(conn), this);
+    if (dlg.exec() != QDialog::Accepted) return;
+    auto cfg = dlg.config();
+    try {
+        ConnectionStore::save(cfg);
+    } catch (const std::exception& e) {
+        QMessageBox::warning(this, "Save failed", e.what());
+        return;
+    }
+    passwords_[conn] = cfg.password;
+    cfg.password.clear();
+    configs_[conn] = cfg;
+    item->setText(qs(cfg.name));
+    dropSessions(conn);
+    tree_->collapse(item->index());
+    resetChildren(item);
+}
+
+void MainWindow::deleteConnection() {
+    auto* item = selectedItem();
+    if (!item) return;
+    while (item->parent()) item = item->parent();
+    if (QMessageBox::question(this, "Delete Connection", "Delete connection \"" + item->text() + "\"?") !=
+        QMessageBox::Yes)
+        return;
+    QString conn = item->data(RoleConn).toString();
+    dropSessions(conn);
+    ConnectionStore::remove(conn.toStdString());
+    model_->removeRow(item->row());
+    configs_.erase(conn);
+    passwords_.erase(conn);
+}
+
+void MainWindow::newSqlEditor() {
+    auto* item = selectedItem();
+    if (!item) {
+        statusBar()->showMessage("Select a PostgreSQL connection first", 3000);
+        return;
+    }
+    QString conn = item->data(RoleConn).toString();
+    if (configs_.at(conn).type != DbType::PostgreSQL) {
+        statusBar()->showMessage("SQL Editor is for PostgreSQL connections", 3000);
+        return;
+    }
+    QString db = item->data(RoleDb).toString();
+    openSqlEditor(conn, db.isEmpty() ? defaultDb(configs_.at(conn)) : db, {}, false);
+}
+
+void MainWindow::openSqlEditor(const QString& connId, const QString& db, const QString& sql, bool runNow) {
+    auto* tab = new SqlEditorTab(configFor(connId, db), sql, runNow);
+    tab->openSql = [this, connId, db](const QString& next) { openSqlEditor(connId, db, next, true); };
+    int i = tabs_->addTab(tab, qs(configs_.at(connId).name) + " · " + db);
+    tabs_->setCurrentIndex(i);
+}
+
+void MainWindow::openRedis(const QString& connId, int db) {
+    auto* tab = new RedisTab(configFor(connId, QString::number(db)));
+    int i = tabs_->addTab(tab, qs(configs_.at(connId).name) + QString(" · DB %1").arg(db));
+    tabs_->setCurrentIndex(i);
+}
+
+// database item: every schema; schema / table item: that schema (table centred)
+void MainWindow::openErDiagram() {
+    auto* item = selectedItem();
+    QString conn = item ? item->data(RoleConn).toString() : QString();
+    if (!item || configs_.at(conn).type != DbType::PostgreSQL) {
+        statusBar()->showMessage("Select a PostgreSQL database, schema or table first", 3000);
+        return;
+    }
+    QString db = item->data(RoleDb).toString();
+    if (db.isEmpty()) db = defaultDb(configs_.at(conn));
+    QString schema = item->data(RoleSchema).toString();
+    QString table = item->data(RoleKind).toInt() == PgRelation ? item->data(RoleName).toString() : QString();
+    statusBar()->showMessage("Loading ER diagram…");
+    pgSession(conn, db).run(
+        this, [](PostgreSQL& pg) { return pg.schemaInfo(); },
+        [=, this](SchemaInfo s) {
+            if (!schema.isEmpty()) {
+                std::string only = schema.toStdString();
+                std::erase_if(s.tables, [&](auto& t) { return t.schema != only; });
+            }
+            int i = tabs_->addTab(makeErDiagram(s, table), QString("ER · %1 · %2")
+                                                               .arg(qs(configs_.at(conn).name),
+                                                                    schema.isEmpty() ? db : db + "." + schema));
+            tabs_->setCurrentIndex(i);
+            statusBar()->clearMessage();
+        },
+        [this](const QString& msg) { statusBar()->showMessage("ER diagram: " + msg, 5000); });
+}
+
+// connection / database item: whole database; schema item: that schema; table item: that table
+void MainWindow::backup() {
+    auto* item = selectedItem();
+    QString conn = item ? item->data(RoleConn).toString() : QString();
+    if (!item || configs_.at(conn).type != DbType::PostgreSQL) {
+        QMessageBox::information(this, "Backup", "Right-click a PostgreSQL database, schema or table to back it up.");
+        return;
+    }
+    QString db = item->data(RoleDb).toString();
+    if (db.isEmpty()) db = defaultDb(configs_.at(conn));
+    QString schema = item->data(RoleSchema).toString();
+    QString table = item->data(RoleKind).toInt() == PgRelation ? item->data(RoleName).toString() : QString();
+    QString base = (table.isEmpty() ? (schema.isEmpty() ? db : db + "_" + schema) : table) + "_" +
+                   QDateTime::currentDateTime().toString("yyyyMMdd_HHmm");
+    QString path = QFileDialog::getSaveFileName(this, "Backup", QDir::home().filePath(base + ".dump"),
+                                                "pg_dump custom archive (*.dump);;Plain SQL (*.sql)");
+    if (path.isEmpty()) return;
+
+    // GUI apps on macOS don't get the shell PATH, so look where Homebrew / Postgres.app put it too
+    QString pgDump = QStandardPaths::findExecutable("pg_dump");
+    if (pgDump.isEmpty())
+        pgDump = QStandardPaths::findExecutable(
+            "pg_dump", {"/opt/homebrew/bin", "/opt/homebrew/opt/libpq/bin", "/usr/local/bin",
+                        "/usr/local/opt/libpq/bin", "/Applications/Postgres.app/Contents/Versions/latest/bin"});
+    if (pgDump.isEmpty()) {
+        QMessageBox::warning(this, "Backup", "pg_dump not found. Install the PostgreSQL client tools "
+                                             "(e.g. brew install libpq) and try again.");
+        return;
+    }
+
+    auto cfg = configFor(conn, db);
+    auto quote = [](const QString& s) { return qs(PostgreSQL::quoteIdent(s.toStdString())); };
+    QStringList args{"--host", qs(cfg.host), "--port", QString::number(cfg.port), "--dbname", db,
+                     "--file", path, "--no-password",
+                     path.endsWith(".sql", Qt::CaseInsensitive) ? "--format=plain" : "--format=custom"};
+    if (!cfg.username.empty()) args << "--username" << qs(cfg.username);
+    if (!table.isEmpty()) args << "--table" << quote(schema) + "." + quote(table);
+    else if (!schema.isEmpty()) args << "--schema" << quote(schema);
+
+    auto* proc = new QProcess(this);
+    auto env = QProcessEnvironment::systemEnvironment();
+    env.insert("PGPASSWORD", qs(cfg.password)); // env, not argv: not visible in ps
+    env.insert("PGSSLMODE", qs(cfg.sslMode));
+    proc->setProcessEnvironment(env);
+    // ponytail: no cancel / progress; add a Stop button if multi-hour dumps become a thing
+    connect(proc, &QProcess::finished, this, [this, proc, path](int code, QProcess::ExitStatus st) {
+        if (st == QProcess::NormalExit && code == 0) {
+            statusBar()->clearMessage();
+            showSaved(this, "Backup finished.", path);
+        } else {
+            statusBar()->clearMessage();
+            QFile::remove(path); // don't leave a half-written dump that looks valid
+            QMessageBox::warning(this, "Backup failed", QString::fromLocal8Bit(proc->readAllStandardError()).trimmed());
+        }
+        proc->deleteLater();
+    });
+    connect(proc, &QProcess::errorOccurred, this, [this, proc](QProcess::ProcessError e) {
+        if (e != QProcess::FailedToStart) return;
+        statusBar()->clearMessage();
+        QMessageBox::warning(this, "Backup failed", proc->errorString());
+        proc->deleteLater();
+    });
+    statusBar()->showMessage("Backing up " + base + "…");
+    proc->start(pgDump, args);
+}
+
+// Format first, then tick the tables (with Select all). Returns the extension and the picked
+// tables as {schema, table}; empty if cancelled.
+std::pair<QString, std::vector<std::pair<std::string, std::string>>>
+MainWindow::pickTables(const std::vector<std::pair<std::string, std::string>>& tables, bool oneSchema) {
+    QDialog dlg(this);
+    dlg.setWindowTitle("Export Tables");
+    auto* format = new QComboBox;
+    format->addItem("CSV (.csv)", "csv");
+    format->addItem("Excel (.xlsx)", "xlsx");
+    format->addItem("JSON: data + structure (.json)", "json");
+    auto* all = new QCheckBox("Select all");
+    auto* list = new QListWidget;
+    for (auto& [schema, name] : tables) {
+        auto* it = new QListWidgetItem(TableIcons::icon(qs(schema), qs(name)),
+                                       oneSchema ? qs(name) : qs(schema) + "." + qs(name), list);
+        it->setFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
+        it->setCheckState(Qt::Unchecked);
+    }
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    buttons->button(QDialogButtonBox::Ok)->setText("Export…");
+    buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    auto checked = [list] {
+        int n = 0;
+        for (int i = 0; i < list->count(); ++i) n += list->item(i)->checkState() == Qt::Checked;
+        return n;
+    };
+    connect(all, &QCheckBox::clicked, &dlg, [=] {
+        auto st = checked() == list->count() ? Qt::Unchecked : Qt::Checked; // partial → all
+        for (int i = 0; i < list->count(); ++i) list->item(i)->setCheckState(st);
+    });
+    connect(list, &QListWidget::itemChanged, &dlg, [=] {
+        int n = checked();
+        all->setCheckState(n == 0 ? Qt::Unchecked : n == list->count() ? Qt::Checked : Qt::PartiallyChecked);
+        buttons->button(QDialogButtonBox::Ok)->setEnabled(n > 0);
+        buttons->button(QDialogButtonBox::Ok)->setText(n ? QString("Export %1…").arg(n) : "Export…");
+    });
+
+    auto* form = new QFormLayout;
+    form->addRow("Format:", format);
+    auto* layout = new QVBoxLayout(&dlg);
+    layout->addLayout(form);
+    layout->addWidget(all);
+    layout->addWidget(list);
+    layout->addWidget(buttons);
+    dlg.resize(380, 480);
+    if (dlg.exec() != QDialog::Accepted) return {};
+
+    std::vector<std::pair<std::string, std::string>> picked;
+    for (int i = 0; i < list->count(); ++i)
+        if (list->item(i)->checkState() == Qt::Checked) picked.push_back(tables[i]);
+    return {format->currentData().toString(), picked};
+}
+
+// database / schema item: tick tables, one file each in a chosen folder
+void MainWindow::exportTables(const QString& conn, const QString& db, const QString& schema) {
+    statusBar()->showMessage("Loading tables…");
+    pgSession(conn, db).run(
+        this,
+        [s = schema.toStdString()](PostgreSQL& pg) {
+            std::vector<std::pair<std::string, std::string>> out;
+            for (auto& sc : s.empty() ? pg.schemas() : std::vector{s})
+                for (auto& rel : pg.relations(sc)) out.emplace_back(sc, rel.first);
+            return out;
+        },
+        [=, this](const std::vector<std::pair<std::string, std::string>>& tables) {
+            statusBar()->clearMessage();
+            if (tables.empty()) {
+                QMessageBox::information(this, "Export Tables", "No tables in " + (schema.isEmpty() ? db : schema) + ".");
+                return;
+            }
+            auto [ext, picked] = pickTables(tables, !schema.isEmpty());
+            if (picked.empty()) return;
+            QString dir = QFileDialog::getExistingDirectory(this, "Export to folder", QDir::homePath());
+            if (dir.isEmpty()) return;
+
+            std::vector<std::pair<std::string, QString>> jobs; // quoted table, file path
+            QStringList existing;
+            for (auto& [s, t] : picked) {
+                QString file = QString(qs(s) + "." + qs(t) + "." + ext).replace('/', '_').replace(':', '_');
+                QString path = QDir(dir).filePath(file);
+                if (QFile::exists(path)) existing << file;
+                jobs.emplace_back(PostgreSQL::quoteIdent(s) + "." + PostgreSQL::quoteIdent(t), path);
+            }
+            if (!existing.isEmpty() &&
+                QMessageBox::question(this, "Export Tables",
+                                      QString("%1 file(s) already exist and will be replaced:\n%2")
+                                          .arg(existing.size())
+                                          .arg(existing.mid(0, 10).join('\n') + (existing.size() > 10 ? "\n…" : ""))) !=
+                    QMessageBox::Yes)
+                return;
+
+            statusBar()->showMessage(QString("Exporting %1 tables…").arg(jobs.size()));
+            // ponytail: one table after another on the worker, no progress / cancel; add when exports get slow
+            pgSession(conn, db).run(
+                this,
+                [jobs](PostgreSQL& pg) {
+                    size_t rows = 0;
+                    for (auto& [table, path] : jobs) {
+                        auto rs = pg.execute("SELECT * FROM " + table);
+                        QString err = writeExport(path, rs, table, isJsonExport(path) ? pg.tableStructureJson(table) : "");
+                        if (!err.isEmpty()) throw DbError(table + ": " + err.toStdString());
+                        rows += rs.rows.size();
+                    }
+                    return rows;
+                },
+                [this, n = jobs.size(), dir](size_t rows) {
+                    statusBar()->clearMessage();
+                    showSaved(this, QString("Exported %1 tables (%2 rows).").arg(n).arg(rows), dir);
+                },
+                [this](const QString& msg) {
+                    statusBar()->clearMessage();
+                    QMessageBox::warning(this, "Export failed", msg);
+                });
+        },
+        [this](const QString& msg) {
+            statusBar()->clearMessage();
+            QMessageBox::warning(this, "Export Tables", msg);
+        });
+}
+
+void MainWindow::exportTable() {
+    auto* item = selectedItem();
+    int kind = item ? item->data(RoleKind).toInt() : 0;
+    if (kind == PgDatabase || kind == PgSchema) {
+        exportTables(item->data(RoleConn).toString(), item->data(RoleDb).toString(),
+                     item->data(RoleSchema).toString());
+        return;
+    }
+    if (kind != PgRelation) {
+        QMessageBox::information(this, "Export", "Right-click a PostgreSQL database, schema or table to export it.");
+        return;
+    }
+    QString conn = item->data(RoleConn).toString(), db = item->data(RoleDb).toString();
+    QString name = item->data(RoleName).toString();
+    QString path = exportPath(this, name);
+    if (path.isEmpty()) return;
+    std::string table = PostgreSQL::quoteIdent(item->data(RoleSchema).toString().toStdString()) + "." +
+                        PostgreSQL::quoteIdent(name.toStdString());
+    statusBar()->showMessage("Exporting " + name + "…");
+    pgSession(conn, db).run(
+        this,
+        [table, path](PostgreSQL& pg) { // query + write on the worker: big tables don't freeze the UI
+            auto rs = pg.execute("SELECT * FROM " + table);
+            QString err = writeExport(path, rs, table, isJsonExport(path) ? pg.tableStructureJson(table) : "");
+            if (!err.isEmpty()) throw DbError(err.toStdString());
+            return rs.rows.size();
+        },
+        [this, path](size_t rows) {
+            statusBar()->clearMessage();
+            showSaved(this, QString("Exported %1 rows.").arg(rows), path);
+        },
+        [this](const QString& msg) {
+            statusBar()->clearMessage();
+            QMessageBox::warning(this, "Export failed", msg);
+        });
+}
+
+ConnectionConfig MainWindow::configFor(const QString& connId, const QString& db) {
+    auto cfg = configs_.at(connId);
+    auto pw = passwords_.find(connId);
+    if (pw == passwords_.end()) pw = passwords_.emplace(connId, ConnectionStore::password(cfg.id)).first;
+    cfg.password = pw->second;
+    if (!db.isEmpty()) cfg.database = db.toStdString();
+    return cfg;
+}
+
+Session<PostgreSQL>& MainWindow::pgSession(const QString& connId, const QString& db) {
+    auto& s = pgSessions_[connId + '/' + db];
+    if (!s) s = std::make_unique<Session<PostgreSQL>>(configFor(connId, db));
+    return *s;
+}
+
+Session<Redis>& MainWindow::redisSession(const QString& connId) {
+    auto& s = redisSessions_[connId];
+    if (!s) s = std::make_unique<Session<Redis>>(configFor(connId));
+    return *s;
+}
+
+void MainWindow::dropSessions(const QString& connId) {
+    std::erase_if(pgSessions_, [&](auto& kv) { return kv.first.startsWith(connId + '/'); });
+    redisSessions_.erase(connId);
+}
