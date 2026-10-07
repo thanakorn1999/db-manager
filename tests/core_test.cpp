@@ -52,6 +52,20 @@ static void completerTests() {
     assert(r.expectsName && has(r, "users") && has(r, "sales.invoices") && has(r, "\"Mixed Case\""));
     r = comp("SELECT * FROM us", s);
     assert(r.items.size() == 1 && r.items[0].insert == "users ");
+    assert(SqlCompleter::tableName("public", "agreements") == "agreements" &&
+           SqlCompleter::tableName("Sales", "order") == "\"Sales\".\"order\"");
+    // PK / FK menu: JOIN the tables whose FKs point at users.id, before WHERE / LIMIT / ;
+    auto j = SqlCompleter::joinsOn("SELECT * FROM users LIMIT 100;", s, "public", "users", "id");
+    assert(j.size() == 1 && j[0].label == "JOIN orders o ON o.user_id = users.id" &&
+           j[0].sql == "SELECT * FROM users JOIN orders o ON o.user_id = users.id LIMIT 100;");
+    j = SqlCompleter::joinsOn("SELECT *\nFROM orders o2\nWHERE o2.id > 1", s, "public", "orders", "id");
+    assert(j.size() == 2 && j[0].sql == "SELECT *\nFROM orders o2\nJOIN order_items oi ON oi.order_id = o2.id\nWHERE o2.id > 1" &&
+           j[1].label == "JOIN sales.invoices i ON i.order_id = o2.id");
+    j = SqlCompleter::joinsOn("SELECT * FROM users u -- note", s, "public", "users", "id");
+    assert(j.size() == 1 && j[0].sql == "SELECT * FROM users u JOIN orders o ON o.user_id = u.id -- note");
+    assert(SqlCompleter::joinsOn("SELECT * FROM orders", s, "public", "users", "id").empty());
+    j = SqlCompleter::joinsOn("SELECT * FROM orders WHERE total > 0", s, "public", "orders", "user_id"); // FK: parent
+    assert(j.size() == 1 && j[0].sql == "SELECT * FROM orders JOIN users u ON u.id = orders.user_id WHERE total > 0");
     r = comp("SELECT * FROM mix", s);
     assert(r.items.size() == 1 && r.items[0].label == "\"Mixed Case\"");
 
@@ -205,6 +219,10 @@ int main() {
         assert(pg.keyFlags(pg.execute("SELECT u, x FROM dbm_c"))[0] == (KeyIndexed | KeyUnique));
         assert(pg.keyFlags(pg.execute("SELECT a FROM dbm_p"))[0] == (KeyPrimary | KeyIndexed)); // composite: not unique alone
         assert(pg.keyFlags(pg.execute("SELECT 1")) == std::vector<uint8_t>{0});
+        // source table / column per result column, also across a JOIN (PK / FK ⋮ menu)
+        auto src = pg.sources(pg.execute("SELECT f.id, e.name AS nm, 1 FROM dbm_f f JOIN dbm_e e ON e.id = f.e_id"));
+        assert(src[0].table == "dbm_f" && src[0].column == "id" && src[1].table == "dbm_e" && src[1].column == "name" &&
+               src[2].table.empty());
 
         // catalog for completion: columns in order, single + composite FKs
         pg.execute("DROP SCHEMA IF EXISTS dbm_test CASCADE; CREATE SCHEMA dbm_test; "

@@ -131,9 +131,7 @@ const SchemaInfo::Table* findTable(const SchemaInfo& s, const std::string& schem
     return found;
 }
 
-std::string tableName(const SchemaInfo::Table& t) {
-    return (t.schema == "public" ? "" : quoteIdent(t.schema) + ".") + quoteIdent(t.name);
-}
+std::string tableName(const SchemaInfo::Table& t) { return SqlCompleter::tableName(t.schema, t.name); }
 
 // Table references: FROM a [AS] x, b / JOIN c y / UPDATE d / INTO e
 std::vector<Ref> findRefs(const std::vector<Token>& toks, const SchemaInfo& schema) {
@@ -551,6 +549,57 @@ void checkStatement(const std::vector<Token>& toks, const SchemaInfo& schema,
 }
 
 } // namespace
+
+std::string tableName(const std::string& schema, const std::string& name) {
+    return (schema == "public" ? "" : quoteIdent(schema) + ".") + quoteIdent(name);
+}
+
+std::vector<Join> joinsOn(const std::string& sql, const SchemaInfo& schema, const std::string& tableSchema,
+                          const std::string& table, const std::string& column) {
+    std::vector<Join> out;
+    std::vector<Token> toks;
+    for (auto& t : tokenize(sql))
+        if (t.kind != Token::Comment) toks.push_back(t);
+    // ponytail: first reference to the table in the text; several statements on it pick the first
+    auto refs = findRefs(toks, schema);
+    auto ref = std::find_if(refs.begin(), refs.end(),
+                            [&](const Ref& r) { return r.table && sameTable(*r.table, tableSchema, table); });
+    if (ref == refs.end()) return out;
+
+    // end of the FROM clause: the first top-level clause keyword, ; or ) after the table
+    static const std::set<std::string> clauseEnd = {"WHERE", "GROUP",  "HAVING",    "ORDER",  "LIMIT",
+                                                    "OFFSET", "UNION", "INTERSECT", "EXCEPT", "WINDOW",
+                                                    "FETCH", "FOR",    "RETURNING"};
+    size_t i = 0;
+    while (toks[i].pos != ref->pos) ++i;
+    int depth = 0;
+    for (; i < toks.size(); ++i) {
+        const auto& t = toks[i];
+        if (t.punct('(')) ++depth;
+        else if (t.punct(')') && --depth < 0) break;
+        else if (depth == 0 && (t.punct(';') || (t.kind == Token::Word && clauseEnd.count(t.upper)))) break;
+    }
+    bool atEnd = i == toks.size();
+    size_t at = atEnd ? toks.back().end : toks[i].pos;
+
+    for (auto& fk : schema.foreignKeys)
+        for (bool refIsFrom : {true, false}) { // FK column: its parent table; PK column: the referencing tables
+            const auto& cols = refIsFrom ? fk.fromColumns : fk.toColumns;
+            if ((refIsFrom ? fk.fromSchema : fk.toSchema) != tableSchema ||
+                (refIsFrom ? fk.fromTable : fk.toTable) != table ||
+                std::find(cols.begin(), cols.end(), column) == cols.end())
+                continue;
+            auto* other = findTable(schema, refIsFrom ? fk.toSchema : fk.fromSchema,
+                                    refIsFrom ? fk.toTable : fk.fromTable);
+            if (!other) continue;
+            std::string alias = makeAlias(other->name, refs);
+            std::string join =
+                "JOIN " + tableName(*other) + " " + alias + " ON " + condition(fk, refIsFrom, ref->handle(), alias);
+            std::string text = atEnd ? " " + join : join + (sql[at - 1] == '\n' ? "\n" : " ");
+            out.push_back({join, sql.substr(0, at) + text + sql.substr(at)});
+        }
+    return out;
+}
 
 std::vector<std::pair<size_t, size_t>> unknownNames(const std::string& sql, const SchemaInfo& schema) {
     std::vector<std::pair<size_t, size_t>> out;

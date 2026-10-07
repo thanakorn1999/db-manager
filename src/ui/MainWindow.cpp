@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include "core/query/SqlCompleter.h"
 #include "ui/Settings.h"
 #include "ui/TableIcons.h"
 #include "ui/connection/ConnectionDialog.h"
@@ -383,9 +384,9 @@ void MainWindow::activated(QStandardItem* item) {
     switch (item->data(RoleKind).toInt()) {
     case PgRelation:
         openSqlEditor(conn, item->data(RoleDb).toString(),
-                      QString("SELECT * FROM %1.%2 LIMIT 100;")
-                          .arg(qs(PostgreSQL::quoteIdent(item->data(RoleSchema).toString().toStdString())),
-                               qs(PostgreSQL::quoteIdent(item->data(RoleName).toString().toStdString()))),
+                      QString("SELECT * FROM %1 LIMIT 100;")
+                          .arg(qs(SqlCompleter::tableName(item->data(RoleSchema).toString().toStdString(),
+                                                          item->data(RoleName).toString().toStdString()))),
                       true);
         break;
     case RedisDb: openRedis(conn, item->data(RoleDb).toInt()); break;

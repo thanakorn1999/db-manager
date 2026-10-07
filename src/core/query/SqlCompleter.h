@@ -29,4 +29,17 @@ Result complete(const std::string& sql, size_t cursor, const SchemaInfo& schema)
 // and columns in WHERE. Empty while schema has no tables (not loaded yet).
 std::vector<std::pair<size_t, size_t>> unknownNames(const std::string& sql, const SchemaInfo& schema);
 
+// How to write a table in SQL: schema dropped for public, quotes only where needed (agreements, "Foo".bar)
+std::string tableName(const std::string& schema, const std::string& name);
+
+// One per foreign key on table.column, either way: sql with "JOIN parent p ON p.pk = table.fk" (FK column)
+// or "JOIN child c ON c.fk = table.pk" (key column) added at the end of the FROM clause that names table.
+// Empty when sql doesn't name table.
+struct Join {
+    std::string label; // the JOIN clause
+    std::string sql;
+};
+std::vector<Join> joinsOn(const std::string& sql, const SchemaInfo& schema, const std::string& tableSchema,
+                          const std::string& table, const std::string& column);
+
 }

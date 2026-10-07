@@ -44,6 +44,7 @@ public:
     // KeyFlag per result column, from the constraints of the source tables.
     std::vector<uint8_t> keyFlags(const ResultSet& rs);
     std::vector<ResultSet::ForeignRef> foreignRefs(const ResultSet& rs);
+    std::vector<ResultSet::Source> sources(const ResultSet& rs);
     static std::string quoteIdent(const std::string& ident);
 
     std::vector<std::string> databases();

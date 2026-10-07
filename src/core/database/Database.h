@@ -58,6 +58,10 @@ struct ResultSet {
         std::vector<std::string> targetColumns; // referenced columns, same order
     };
     std::vector<ForeignRef> foreignRefs;
+    struct Source {
+        std::string schema, table, column; // empty = computed
+    };
+    std::vector<Source> sources; // PostgreSQL: per column, where it was read from
 };
 // indexed: in any index; unique: a single-column unique index / constraint on its own
 enum KeyFlag : uint8_t { KeyPrimary = 1, KeyForeign = 2, KeyIndexed = 4, KeyUnique = 8 };

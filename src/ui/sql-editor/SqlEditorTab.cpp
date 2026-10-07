@@ -80,6 +80,40 @@ private:
     ResultModel* model_;
 };
 
+// PK / FK headers get a ⋮ in their right corner; clicking it opens a menu (JOIN the related tables).
+class KeyHeader : public QHeaderView {
+public:
+    KeyHeader() : QHeaderView(Qt::Horizontal) {
+        setSectionsClickable(true); // as QTableView's own header
+        setHighlightSections(true);
+    }
+    std::function<bool(int)> hasMenu;
+    std::function<void(int, QPoint)> openMenu; // section, global position below the ⋮
+
+protected:
+    void paintSection(QPainter* p, const QRect& rect, int section) const override {
+        p->save();
+        QHeaderView::paintSection(p, rect, section);
+        p->restore();
+        if (!hasMenu(section)) return;
+        p->setPen(palette().color(QPalette::Link));
+        p->drawText(menuRect(rect), Qt::AlignCenter, QStringLiteral("⋮"));
+    }
+
+    void mousePressEvent(QMouseEvent* e) override {
+        int s = logicalIndexAt(e->position().toPoint());
+        QRect r(sectionViewportPosition(s), 0, sectionSize(s), height());
+        if (s >= 0 && hasMenu(s) && menuRect(r).contains(e->position().toPoint())) {
+            openMenu(s, mapToGlobal(menuRect(r).bottomLeft()));
+            return; // a button: no column selection
+        }
+        QHeaderView::mousePressEvent(e);
+    }
+
+private:
+    static QRect menuRect(const QRect& section) { return QRect(section.right() - 17, section.top(), 14, section.height()); }
+};
+
 // "table_name" is selected after insert so typing replaces it.
 const std::pair<const char*, const char*> kTemplates[] = {
     {"SELECT", "SELECT *\nFROM table_name\nWHERE condition\nLIMIT 100;"},
@@ -198,6 +232,30 @@ SqlEditorTab::SqlEditorTab(const ConnectionConfig& cfg, const QString& sql, bool
     };
     fkDelegate->describe = [parentQuery](const QModelIndex& index) { return "Open " + parentQuery(index); };
     table_->setItemDelegate(fkDelegate);
+    // PK / FK ⋮: JOIN a table related through a foreign key, written into the SQL
+    auto* header = new KeyHeader;
+    header->hasMenu = [this](int col) {
+        const auto& rs = model_->result();
+        return size_t(col) < rs.keyFlags.size() && (rs.keyFlags[col] & (KeyPrimary | KeyForeign)) &&
+               size_t(col) < rs.sources.size() && !rs.sources[col].table.empty();
+    };
+    header->openMenu = [this](int col, QPoint at) {
+        const auto& src = model_->result().sources[col];
+        auto joins = SqlCompleter::joinsOn(editor_->toPlainText().toStdString(), schema_, src.schema, src.table,
+                                           src.column);
+        QMenu menu;
+        for (auto& j : joins)
+            connect(menu.addAction(QString::fromStdString(j.label)), &QAction::triggered, this,
+                    [this, sql = QString::fromStdString(j.sql)] {
+                        auto c = editor_->textCursor();
+                        c.select(QTextCursor::Document);
+                        c.insertText(sql); // one undo step
+                        editor_->setFocus();
+                    });
+        if (joins.empty()) menu.addAction("No related table")->setEnabled(false);
+        menu.exec(at);
+    };
+    table_->setHorizontalHeader(header);
     table_->setWordWrap(false);
     table_->horizontalHeader()->setDefaultSectionSize(140);
     table_->verticalHeader()->setDefaultSectionSize(22);
@@ -381,6 +439,7 @@ void SqlEditorTab::execute(const QString& sql, const QString& note) {
                 t = pg.editTarget(rs);
                 rs.keyFlags = pg.keyFlags(rs);
                 rs.foreignRefs = pg.foreignRefs(rs);
+                rs.sources = pg.sources(rs);
             } catch (const std::exception& e) { // catalog lookups only cost editing / colours
                 t.readOnlyReason = e.what();
             }

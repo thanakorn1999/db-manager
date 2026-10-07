@@ -292,6 +292,23 @@ std::vector<uint8_t> PostgreSQL::keyFlags(const ResultSet& rs) {
     return flags;
 }
 
+std::vector<ResultSet::Source> PostgreSQL::sources(const ResultSet& rs) {
+    std::vector<ResultSet::Source> out(rs.columns.size());
+    std::string oids;
+    for (unsigned o : rs.sourceTable)
+        if (o) oids += (oids.empty() ? "" : ",") + std::to_string(o);
+    if (oids.empty()) return out;
+    std::map<std::pair<unsigned, int>, ResultSet::Source> byColumn;
+    for (auto& row : execute("SELECT c.oid::bigint, a.attnum, n.nspname, c.relname, a.attname FROM pg_attribute a "
+                             "JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace "
+                             "WHERE a.attrelid = ANY($1::oid[]) AND a.attnum > 0",
+                             {"{" + oids + "}"}).rows)
+        byColumn[{unsigned(std::stoul(*row[0])), std::stoi(*row[1])}] = {*row[2], *row[3], *row[4]};
+    for (size_t c = 0; c < out.size(); ++c)
+        if (auto it = byColumn.find({rs.sourceTable[c], rs.sourceColumn[c]}); it != byColumn.end()) out[c] = it->second;
+    return out;
+}
+
 std::vector<ResultSet::ForeignRef> PostgreSQL::foreignRefs(const ResultSet& rs) {
     std::vector<ResultSet::ForeignRef> out;
     std::string oids;
