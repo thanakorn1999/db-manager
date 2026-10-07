@@ -9,11 +9,13 @@
 using Params = std::vector<std::optional<std::string>>; // nullopt = NULL
 
 // Where edits to a result grid go: one table with its primary key in the result.
+// A JOIN result edits the table of its first column; the other tables' columns stay read-only.
 struct EditTarget {
     std::string schema, table;
     std::vector<std::string> columns; // attname per result column, "" = not editable
     std::vector<int> keyColumns;      // result column indexes of the primary key
     std::string readOnlyReason;       // non-empty = result can't be edited
+    bool joined = false;              // result also has columns of other tables
 };
 
 struct Statement {

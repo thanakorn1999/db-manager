@@ -345,10 +345,11 @@ SqlEditorTab::SqlEditorTab(const ConnectionConfig& cfg, const QString& sql, bool
                                                      "then Export saves its result grid.");
             return;
         }
-        QString base = target_.table.empty() ? "result" : QString::fromStdString(target_.table);
+        bool oneTable = !target_.table.empty() && !target_.joined; // a JOIN's rows don't fit one table
+        QString base = oneTable ? QString::fromStdString(target_.table) : "result";
         QString path = exportPath(this, base);
         if (path.isEmpty()) return;
-        std::string table = target_.table.empty() ? "table_name"
+        std::string table = !oneTable ? "table_name"
                                                   : PostgreSQL::quoteIdent(target_.schema) + "." +
                                                         PostgreSQL::quoteIdent(target_.table);
         // ponytail: exports the rows as loaded, not pending grid edits
@@ -357,7 +358,7 @@ SqlEditorTab::SqlEditorTab(const ConnectionConfig& cfg, const QString& sql, bool
             if (err.isEmpty()) showSaved(this, QString("Exported %1 rows.").arg(rs.rows.size()), path);
             else QMessageBox::warning(this, "Export failed", err);
         };
-        if (!isJsonExport(path) || target_.table.empty()) {
+        if (!isJsonExport(path) || !oneTable) {
             finish({}); // a query not on one table: JSON gets just the column names
             return;
         }
@@ -458,7 +459,8 @@ void SqlEditorTab::execute(const QString& sql, const QString& note) {
             }
             QString edit = rs.columns.empty() ? QString()
                            : target_.readOnlyReason.empty()
-                               ? " · editable (double-click a cell)"
+                               ? (target_.joined ? " · " + QString::fromStdString(target_.table) + " editable" : " · editable") +
+                                     " (double-click a cell)"
                                : " · read-only: " + QString::fromStdString(target_.readOnlyReason);
             status_->setText(QString("%1%2 · %3 rows · %4 ms%5")
                                  .arg(note.isEmpty() ? QString() : note + " · ", QString::fromStdString(rs.status))
@@ -489,10 +491,22 @@ void SqlEditorTab::save() {
         return w;
     };
 
+    // a JOIN repeats a row per match: delete it once, and don't update it too
+    auto key = [&](int row) {
+        std::vector<std::optional<std::string>> k;
+        for (int c : target_.keyColumns) k.push_back(rows[row][c]);
+        return k;
+    };
+    std::set<std::vector<std::optional<std::string>>> deleted, emitted;
+    for (auto& ch : changes)
+        if (ch.deleted) deleted.insert(key(ch.row));
+
     std::vector<Statement> stmts;
     for (auto& ch : changes) {
         Statement st;
         st.expectOneRow = true;
+        if (!ch.inserted && deleted.count(key(ch.row)) && (!ch.deleted || !emitted.insert(key(ch.row)).second))
+            continue;
         if (ch.deleted) {
             st.sql = "DELETE FROM " + table + " WHERE " + where(ch.row, st.params);
         } else if (ch.inserted) {

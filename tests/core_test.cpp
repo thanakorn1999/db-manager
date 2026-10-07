@@ -190,6 +190,10 @@ int main() {
         assert(t.columns == (V{"name", "id", "", ""}) && t.keyColumns == std::vector<int>{1});
         assert(!pg.editTarget(pg.execute("SELECT name FROM dbm_e")).readOnlyReason.empty()); // no PK
         assert(!pg.editTarget(pg.execute("SELECT 1")).readOnlyReason.empty());
+        pg.execute("CREATE TEMP TABLE dbm_j(id int PRIMARY KEY, e_id int)");
+        auto jt = pg.editTarget(pg.execute("SELECT * FROM dbm_e JOIN dbm_j j ON j.e_id = dbm_e.id"));
+        assert(jt.readOnlyReason.empty() && jt.joined && jt.table == "dbm_e" && // JOIN: the FROM table is editable
+               jt.columns == (V{"id", "name", "", "", ""}) && jt.keyColumns == std::vector<int>{0});
         auto tbl = PostgreSQL::quoteIdent(t.schema) + "." + PostgreSQL::quoteIdent(t.table);
         err = false;
         try {

@@ -151,8 +151,8 @@ EditTarget PostgreSQL::editTarget(const ResultSet& rs) {
     unsigned oid = 0;
     for (unsigned o : rs.sourceTable) {
         if (!o) continue;
-        if (oid && o != oid) return readOnly("result spans several tables");
-        oid = o;
+        if (oid && o != oid) t.joined = true;
+        if (!oid) oid = o; // ponytail: the FROM table is assumed to come first (SELECT * FROM a JOIN b)
     }
     if (!oid) return readOnly("result is not from a table");
     std::string o = std::to_string(oid);
