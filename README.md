@@ -33,11 +33,37 @@ build\Release\db-manager.exe
 
 **Backup** runs `pg_dump`: install PostgreSQL (or just its command-line tools) and add its `bin` folder to `PATH`.
 
+Dev loop: after the setup above, only changed files recompile and `windeployqt` doesn't need to run again.
+
+```powershell
+cmake --build build --config Release; if ($?) { build\Release\db-manager.exe }
+```
+
+- **Visual Studio:** open `build\db-manager.sln`, set `db-manager` as the startup project, pick Release, F5.
+- **VS Code:** CMake Tools extension with
+  `"cmake.configureSettings": { "CMAKE_TOOLCHAIN_FILE": "C:/vcpkg/scripts/buildsystems/vcpkg.cmake", "VCPKG_TARGET_TRIPLET": "x64-windows" }`.
+- Stick to Release for now; Debug needs the Qt debug DLLs deployed and hasn't been checked.
+
+### Prebuilt (CI)
+
+Every push builds on GitHub Actions (`.github/workflows/windows.yml`). Open the run under **Actions**, download the `db-manager-windows-x64` artifact (needs a GitHub login), unzip it and run `db-manager.exe`.
+
+- Keep the whole folder: the exe needs the DLLs and `platforms/` next to it.
+- The exe isn't signed, so SmartScreen warns: **More info → Run anyway**.
+- Missing `VCRUNTIME140.dll` / `MSVCP140.dll`: install the *Microsoft Visual C++ Redistributable (x64)*.
+
 ## Test
 
 ```sh
 ctest --test-dir build                                   # unit checks
 DBM_TEST_PG=localhost:5432 DBM_TEST_REDIS=127.0.0.1:6379 ctest --test-dir build --output-on-failure
+```
+
+Windows (PowerShell):
+
+```powershell
+ctest --test-dir build -C Release --output-on-failure
+$env:DBM_TEST_PG="localhost:5432"; $env:DBM_TEST_REDIS="127.0.0.1:6379"; ctest --test-dir build -C Release --output-on-failure
 ```
 
 The Redis live test uses DB 15 and runs `FLUSHDB` on it.

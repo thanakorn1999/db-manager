@@ -1,5 +1,8 @@
 #include "Redis.h"
 
+#ifdef _WIN32
+#include <winsock2.h> // timeval (hiredis only forward-declares it on Windows)
+#endif
 #include <hiredis/hiredis_ssl.h>
 #include <cctype>
 #include <mutex>
