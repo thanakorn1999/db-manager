@@ -32,6 +32,7 @@
 #include <QStyle>
 #include <QTabWidget>
 #include <QToolBar>
+#include <QToolButton>
 #include <QTreeView>
 
 namespace {
@@ -78,7 +79,38 @@ MainWindow::MainWindow() {
     tabs_->setMovable(true);
 
     auto* splitter = new QSplitter;
-    splitter->addWidget(tree_);
+    // inside a database the tree shows only it, like opening a folder; this bar goes back / switches
+    dbBack_ = new QToolButton;
+    dbBack_->setIcon(style()->standardIcon(QStyle::SP_ArrowBack));
+    dbBack_->setAutoRaise(true);
+    dbBack_->setShortcut(QKeySequence::Back); // ⌘[
+    dbPick_ = new QComboBox;
+    dbPick_->setToolTip("Switch database");
+    // long names elide instead of widening the explorer
+    dbPick_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    dbPick_->setMinimumContentsLength(8);
+    dbBar_ = new QWidget;
+    auto* bar = new QHBoxLayout(dbBar_);
+    bar->setContentsMargins(4, 4, 4, 4);
+    bar->addWidget(dbBack_);
+    bar->addWidget(dbPick_, 1);
+    dbBar_->hide();
+    connect(dbBack_, &QToolButton::clicked, this, &MainWindow::leaveDatabase);
+    connect(dbPick_, &QComboBox::activated, this, [this](int i) {
+        auto* conn = model_->itemFromIndex(tree_->rootIndex())->parent();
+        enterDatabase(conn->child(dbPick_->itemData(i).toInt()));
+    });
+    // database row gone (refresh / disconnect / delete): the view falls back to the full tree
+    connect(model_, &QAbstractItemModel::rowsRemoved, this, [this] {
+        if (!tree_->rootIndex().isValid()) dbBar_->hide();
+    });
+    auto* left = new QWidget;
+    auto* leftLayout = new QVBoxLayout(left);
+    leftLayout->setContentsMargins(0, 0, 0, 0);
+    leftLayout->setSpacing(0);
+    leftLayout->addWidget(dbBar_);
+    leftLayout->addWidget(tree_);
+    splitter->addWidget(left);
     splitter->addWidget(tabs_);
     splitter->setStretchFactor(1, 1);
     splitter->setSizes({280, 920});
@@ -148,8 +180,11 @@ MainWindow::MainWindow() {
         resetChildren(item);
         statusBar()->showMessage("Disconnected " + item->text(), 3000);
     });
-    connect(tree_, &QTreeView::expanded, this,
-            [this](const QModelIndex& idx) { loadChildren(model_->itemFromIndex(idx)); });
+    connect(tree_, &QTreeView::expanded, this, [this](const QModelIndex& idx) {
+        auto* item = model_->itemFromIndex(idx);
+        if (item->data(RoleKind).toInt() == PgDatabase) enterDatabase(item);
+        loadChildren(item);
+    });
     connect(tree_, &QTreeView::doubleClicked, this,
             [this](const QModelIndex& idx) { activated(model_->itemFromIndex(idx)); });
     connect(tabs_, &QTabWidget::tabCloseRequested, this, &MainWindow::closeTab);
@@ -355,6 +390,29 @@ void MainWindow::activated(QStandardItem* item) {
         break;
     case RedisDb: openRedis(conn, item->data(RoleDb).toInt()); break;
     }
+}
+
+void MainWindow::enterDatabase(QStandardItem* db) {
+    if (tree_->rootIndex() == db->index()) return;
+    if (auto old = tree_->rootIndex(); old.isValid()) tree_->collapse(old); // so it can be entered again
+    auto* conn = db->parent();
+    dbBack_->setToolTip("Back to " + conn->text() + " (⌘[)");
+    dbPick_->clear();
+    for (int r = 0; r < conn->rowCount(); ++r)
+        if (auto* c = conn->child(r); c->data(RoleKind).toInt() == PgDatabase) dbPick_->addItem(c->icon(), c->text(), r);
+    dbPick_->setCurrentIndex(dbPick_->findData(db->row()));
+    tree_->setRootIndex(db->index());
+    tree_->expand(db->index()); // loads its schemas when entered from the switcher
+    dbBar_->show();
+}
+
+void MainWindow::leaveDatabase() {
+    QModelIndex db = tree_->rootIndex();
+    tree_->setRootIndex({});
+    dbBar_->hide();
+    if (!db.isValid()) return;
+    tree_->collapse(db);
+    tree_->setCurrentIndex(db);
 }
 
 void MainWindow::newConnection() {

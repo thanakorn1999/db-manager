@@ -11,6 +11,8 @@ class QStandardItem;
 class QStandardItemModel;
 class QTabWidget;
 class QTreeView;
+class QComboBox;
+class QToolButton;
 
 class MainWindow : public QMainWindow {
 public:
@@ -31,6 +33,8 @@ private:
     void fillChildren(QStandardItem* item, int token, QList<QStandardItem*> children);
     void loadFailed(QStandardItem* item, int token, const QString& msg);
     void activated(QStandardItem* item);
+    void enterDatabase(QStandardItem* db);
+    void leaveDatabase();
 
     void newConnection();
     void editConnection();
@@ -52,6 +56,9 @@ private:
 
     QStandardItemModel* model_;
     QTreeView* tree_;
+    QWidget* dbBar_;       // shown while inside a database: back + switch
+    QToolButton* dbBack_;
+    QComboBox* dbPick_;
     QTabWidget* tabs_;
     int loadSeq_ = 0;
     std::map<QString, ConnectionConfig> configs_;

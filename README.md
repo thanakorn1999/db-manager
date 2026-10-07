@@ -52,9 +52,13 @@ After `JOIN`, tables linked by a foreign key come first with the condition fille
 - **Value colours** (Settings) — text / background for TRUE, FALSE, NULL, empty text (shown as `<EMPTY>`), "not important" columns, and optionally key columns (off by default: the header tags mark them). Edit highlights win over all of these.
 - Rows alternate colours.
 
+## Databases
+
+Opening a PostgreSQL database (double-click or ▸) goes inside it, like a folder: the explorer shows only that database's schemas and tables. The bar on top switches to another database of the same connection, and **‹ connection** (⌘[) goes back to the full list.
+
 ## Table icons
 
-Tables in the explorer get an emoji guessed from their name (`users` → 🧑, `orders` → 🧾, `products` → 📦, `user_roles` → 🔑 — the last word counts most); no match keeps the file icon. Right-click → **Set Icon…** to pick another or type any emoji; **Automatic** goes back to the guess. Stored per `schema.table`, shared by all connections.
+Tables in the explorer get an emoji guessed from their name (`users` → 🧑, `orders` → 🧾, `products` → 📦, `user_roles` → 🔑 — the last word counts most); no match keeps the file icon. Right-click → **Set Icon…** to pick another or type any emoji; **Automatic** goes back to the guess. Emoji you type there are kept under **My icons** at the top of the picker (right-click one to remove it). Stored per `schema.table`, shared by all connections.
 
 ## Editing
 

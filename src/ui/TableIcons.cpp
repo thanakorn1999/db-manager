@@ -1,5 +1,6 @@
 #include "TableIcons.h"
 
+#include <QAction>
 #include <QApplication>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -124,25 +125,45 @@ bool pick(QWidget* parent, const QString& schema, const QString& table) {
     QString before = chosen(schema, table), result = before;
 
     auto* custom = new QLineEdit(before);
-    custom->setPlaceholderText("or type / paste any emoji (⌃⌘Space)");
-    auto* grid = new QGridLayout;
+    custom->setPlaceholderText("or type / paste any emoji (⌃⌘Space), saved to My icons");
     static const char* palette[] = {"🧑", "🧑‍🤝‍🧑", "👤", "👥", "🏢", "🧾", "📦", "🛒", "💳", "💰", "🏷️", "📝", "💬", "✉️",
                                     "🔔", "📜", "📊", "⚙️", "🔑", "🔒", "📍", "🌍", "📅", "⏰", "🖼️", "📁",
                                     "🔗", "⭐", "🎮", "🚚", "🏪", "🎫", "🛠️", "🎓", "🏥", "🍔", "📚", "🧪",
                                     "🐞", "❤️", "🚀", "📄"};
-    int n = 0;
-    for (auto* e : palette) {
-        auto* b = new QToolButton;
-        b->setText(QString::fromUtf8(e));
-        b->setAutoRaise(true);
-        b->setStyleSheet("font-size: 20px; padding: 2px;");
-        QObject::connect(b, &QToolButton::clicked, &dlg, [&dlg, &result, e] {
-            result = QString::fromUtf8(e);
-            dlg.accept();
-        });
-        grid->addWidget(b, n / 10, n % 10);
-        ++n;
-    }
+    QStringList builtIn;
+    for (auto* e : palette) builtIn << QString::fromUtf8(e);
+    // emoji the user typed before, kept at the top of the picker; right-click removes
+    const QString mineKey = "iconPalette/mine";
+    QStringList mine = QSettings().value(mineKey).toStringList();
+
+    auto makeGrid = [&](const QStringList& emojis, bool removable) {
+        auto* grid = new QGridLayout;
+        for (int n = 0; n < emojis.size(); ++n) {
+            QString e = emojis[n];
+            auto* b = new QToolButton;
+            b->setText(e);
+            b->setAutoRaise(true);
+            b->setStyleSheet("font-size: 20px; padding: 2px;");
+            QObject::connect(b, &QToolButton::clicked, &dlg, [&dlg, &result, e] {
+                result = e;
+                dlg.accept();
+            });
+            if (removable) {
+                auto* remove = new QAction("Remove from My icons", b);
+                QObject::connect(remove, &QAction::triggered, b, [b, e, mineKey] {
+                    QSettings s;
+                    QStringList list = s.value(mineKey).toStringList();
+                    list.removeAll(e);
+                    s.setValue(mineKey, list);
+                    b->hide();
+                });
+                b->addAction(remove);
+                b->setContextMenuPolicy(Qt::ActionsContextMenu);
+            }
+            grid->addWidget(b, n / 10, n % 10);
+        }
+        return grid;
+    };
     QString guess = detect(table);
     auto* autoButton = new QToolButton;
     autoButton->setText(guess.isEmpty() ? "Automatic (plain file icon)" : "Automatic: " + guess + " from the name");
@@ -159,13 +180,22 @@ bool pick(QWidget* parent, const QString& schema, const QString& table) {
 
     auto* layout = new QVBoxLayout(&dlg);
     layout->addWidget(new QLabel(QString("<b>%1.%2</b>").arg(schema.toHtmlEscaped(), table.toHtmlEscaped())));
-    layout->addLayout(grid);
+    if (!mine.isEmpty()) {
+        layout->addWidget(new QLabel("My icons"));
+        layout->addLayout(makeGrid(mine, true));
+        layout->addWidget(new QLabel("Icons"));
+    }
+    layout->addLayout(makeGrid(builtIn, false));
     layout->addWidget(autoButton);
     layout->addWidget(custom);
     layout->addWidget(buttons);
     if (dlg.exec() != QDialog::Accepted || result == before) return false;
 
     QSettings s;
+    if (!result.isEmpty() && !builtIn.contains(result) && !mine.contains(result)) {
+        mine.prepend(result); // ponytail: no cap; add one if the list ever gets unwieldy
+        s.setValue(mineKey, mine);
+    }
     if (result.isEmpty()) s.remove(settingsKey(schema, table));
     else s.setValue(settingsKey(schema, table), result);
     return true;
