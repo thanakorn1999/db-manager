@@ -1,0 +1,11 @@
+{
+  "name": "db-manager",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "qtbase",
+    "qtkeychain-qt6",
+    "libpq",
+    { "name": "hiredis", "features": ["ssl"] },
+    "zlib"
+  ]
+}

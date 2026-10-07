@@ -5,13 +5,20 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
-# ponytail: deps via Homebrew/system packages (find_package/pkg-config); add vcpkg.json when Windows/CI builds matter
+# deps: Homebrew / system packages on macOS & Linux, vcpkg (vcpkg.json) on Windows
 find_package(Qt6 REQUIRED COMPONENTS Core Widgets)
 find_package(Qt6Keychain REQUIRED)
 find_package(PostgreSQL REQUIRED)
-find_package(PkgConfig REQUIRED)
 find_package(ZLIB REQUIRED) # xlsx export (deflate)
-pkg_check_modules(HIREDIS REQUIRED IMPORTED_TARGET hiredis hiredis_ssl)
+find_package(hiredis CONFIG QUIET) # vcpkg ships CMake configs; Homebrew / distros only pkg-config
+if(hiredis_FOUND)
+    find_package(hiredis_ssl CONFIG REQUIRED)
+    set(REDIS_LIBS hiredis::hiredis hiredis::hiredis_ssl)
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(HIREDIS REQUIRED IMPORTED_TARGET hiredis hiredis_ssl)
+    set(REDIS_LIBS PkgConfig::HIREDIS)
+endif()
 
 # core: no Qt Widgets
 add_library(dbcore STATIC
@@ -23,9 +30,9 @@ add_library(dbcore STATIC
     src/core/export/Export.cpp
 )
 target_include_directories(dbcore PUBLIC src)
-target_link_libraries(dbcore PUBLIC Qt6::Core PostgreSQL::PostgreSQL PkgConfig::HIREDIS ZLIB::ZLIB)
+target_link_libraries(dbcore PUBLIC Qt6::Core PostgreSQL::PostgreSQL ${REDIS_LIBS} ZLIB::ZLIB)
 
-add_executable(db-manager MACOSX_BUNDLE
+add_executable(db-manager WIN32 MACOSX_BUNDLE # WIN32: no console window
     src/main.cpp
     src/ui/MainWindow.cpp
     src/ui/ResultModel.cpp

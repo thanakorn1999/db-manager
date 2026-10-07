@@ -11,6 +11,28 @@ cmake --build build -j
 open build/db-manager.app
 ```
 
+## Build (Windows)
+
+> Not tested on Windows yet. If something breaks, please open an issue or a PR.
+
+Needs **Visual Studio 2022** (workload *Desktop development with C++*), **CMake 3.21+** and **Git**. Dependencies come from [vcpkg](https://github.com/microsoft/vcpkg) via `vcpkg.json`.
+
+```powershell
+# once: get vcpkg
+git clone https://github.com/microsoft/vcpkg C:\vcpkg
+C:\vcpkg\bootstrap-vcpkg.bat
+
+# configure + build (the first configure compiles Qt and the other deps: about an hour)
+cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows
+cmake --build build --config Release
+
+# copy the Qt plugins next to the exe, then run
+build\vcpkg_installed\x64-windows\tools\Qt6\bin\windeployqt.exe build\Release\db-manager.exe
+build\Release\db-manager.exe
+```
+
+**Backup** runs `pg_dump`: install PostgreSQL (or just its command-line tools) and add its `bin` folder to `PATH`.
+
 ## Test
 
 ```sh
