@@ -1,0 +1,41 @@
+name: Windows build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-cache
+    steps:
+      - uses: actions/checkout@v4
+
+      # first run compiles Qt (~1 h); later runs restore the built packages
+      - uses: actions/cache/restore@v4
+        with:
+          path: vcpkg-cache
+          key: vcpkg-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}
+          restore-keys: vcpkg-${{ hashFiles('vcpkg.json') }}-
+      - run: New-Item -ItemType Directory -Force vcpkg-cache
+
+      - run: cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows
+
+      # save even if our own code fails to compile, so the hour of Qt isn't lost
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: vcpkg-cache
+          key: vcpkg-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}
+
+      - run: cmake --build build --config Release
+      - run: ctest --test-dir build -C Release --output-on-failure
+      - run: build\vcpkg_installed\x64-windows\tools\Qt6\bin\windeployqt.exe build\Release\db-manager.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: db-manager-windows-x64
+          path: build/Release/
