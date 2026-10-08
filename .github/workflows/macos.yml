@@ -1,0 +1,41 @@
+name: macOS build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+jobs:
+  build:
+    runs-on: macos-latest # Apple Silicon
+    permissions:
+      contents: write # attach the .dmg to a release
+    steps:
+      - uses: actions/checkout@v7
+
+      - run: brew install qt qtkeychain libpq hiredis
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$(brew --prefix qt);$(brew --prefix qtkeychain);$(brew --prefix libpq)"
+      - run: cmake --build build -j
+      - run: ctest --test-dir build --output-on-failure
+
+      # self-contained .app (Qt, libpq, hiredis copied in), ad-hoc signed, in a drag-to-Applications .dmg.
+      # -libpath: Homebrew's brotli is linked by @rpath. Warnings about unused Qt plugins (pdf, svg) are harmless.
+      - run: |
+          mkdir dmg
+          cp -R build/db-manager.app "dmg/DB Manager.app"
+          "$(brew --prefix qt)/bin/macdeployqt" "dmg/DB Manager.app" -libpath="$(brew --prefix)/lib"
+          codesign --force --deep --sign - "dmg/DB Manager.app"
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname "DB Manager" -srcfolder dmg -format UDZO db-manager-macos-arm64.dmg
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: db-manager-macos-arm64
+          path: db-manager-macos-arm64.dmg
+
+      - if: github.event_name == 'release'
+        run: gh release upload "${{ github.event.release.tag_name }}" db-manager-macos-arm64.dmg --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}

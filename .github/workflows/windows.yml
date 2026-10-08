@@ -4,10 +4,14 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  release:
+    types: [published]
 
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: write # attach the .zip to a release
     env:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-cache
     steps:
@@ -38,3 +42,10 @@ jobs:
         with:
           name: db-manager-windows-x64
           path: build/Release/
+
+      - if: github.event_name == 'release'
+        run: |
+          Get-ChildItem build/Release | Where-Object Name -ne core_test.exe | Compress-Archive -DestinationPath db-manager-windows-x64.zip
+          gh release upload "${{ github.event.release.tag_name }}" db-manager-windows-x64.zip --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
