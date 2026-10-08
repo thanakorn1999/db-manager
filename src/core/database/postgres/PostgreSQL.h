@@ -47,7 +47,8 @@ public:
     // ponytail: PQexec buffers the whole result in memory; switch to single-row mode for huge result sets
     ResultSet execute(const std::string& sql);
     ResultSet execute(const std::string& sql, const Params& params);
-    // All-or-nothing; uses a savepoint if a transaction is already open.
+    // All-or-nothing; uses a savepoint if a transaction is already open. A statement without params may be
+    // a multi-statement script.
     void executeInTransaction(const std::vector<Statement>& stmts);
     EditTarget editTarget(const ResultSet& rs);
     // KeyFlag per result column, from the constraints of the source tables.
@@ -62,8 +63,9 @@ public:
     std::vector<std::pair<std::string, char>> relations(const std::string& schema);
     // ponytail: whole-catalog snapshot per editor tab; fine up to tens of thousands of columns
     SchemaInfo schemaInfo();
-    // One relation's structure as a JSON object (columns, primary key, foreign keys, other constraints,
-    // indexes, comment), built by PostgreSQL itself. qualifiedName is quoted, e.g. "public"."users".
+    // One relation's structure as a JSON object (columns with type / default / identity / generated, primary
+    // key, foreign keys, other constraints, indexes, comment), built by PostgreSQL itself; Import reads it back.
+    // qualifiedName is quoted, e.g. "public"."users".
     std::string tableStructureJson(const std::string& qualifiedName);
     // rels ({schema, name}) first, then every table referencing them through a foreign key, transitively.
     std::vector<DropTarget> dropClosure(const std::vector<std::pair<std::string, std::string>>& rels);

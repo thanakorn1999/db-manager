@@ -11,6 +11,7 @@ Want to help? Pick an unchecked item, open an issue to say you're on it, then se
 - Explorer: open a database like a folder; multi-select tables, ⌘A selects a schema's tables, ⌘⌫ drops them (FK-aware: drop referencing tables too, or CASCADE); Drop Database
 - Redis: connections, DB selection, SCAN key browser + search, viewers / editors for string, hash, list, set, sorted set, TTL, rename, delete, command editor
 - Export: CSV, Excel (.xlsx), JSON (data + structure), SQL INSERTs; whole database / schema to one .zip or one file per table
+- Import: the same formats and .zip, many files at once, data only or data + structure (one transaction)
 - Backup: `pg_dump`
 - Windows build (vcpkg), macOS .dmg, GitHub Actions CI; releases attach both
 - App icon, ER diagram, table icons, Settings (grid colours), passwords in the OS keychain
@@ -20,7 +21,6 @@ Want to help? Pick an unchecked item, open an issue to say you're on it, then se
 - [ ] Pagination for big tables (single-row mode instead of loading the whole result)
 - [ ] Query history
 - [ ] Restore (`pg_restore` / run .sql)
-- [ ] Import CSV
 - [ ] Progress + cancel for long exports and backups
 
 ## Schema manager

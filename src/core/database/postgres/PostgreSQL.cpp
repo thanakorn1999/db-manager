@@ -160,7 +160,7 @@ void PostgreSQL::executeInTransaction(const std::vector<Statement>& stmts) {
     execute(nested ? "SAVEPOINT dbm_edit" : "BEGIN");
     try {
         for (auto& st : stmts) {
-            auto rs = execute(st.sql, st.params);
+            auto rs = st.params.empty() ? execute(st.sql) : execute(st.sql, st.params); // no params: scripts allowed
             if (st.expectOneRow && rs.affected != 1)
                 throw DbError(std::to_string(rs.affected) +
                               " rows affected, expected 1 (row changed or deleted meanwhile?)\n" + st.sql);
@@ -280,6 +280,7 @@ std::string PostgreSQL::tableStructureJson(const std::string& qualifiedName) {
         "'comment', obj_description(c.oid, 'pg_class'), "
         "'columns', (SELECT json_agg(json_build_object('name', a.attname, 'type', format_type(a.atttypid, a.atttypmod), "
         "  'nullable', NOT a.attnotnull, 'default', pg_get_expr(d.adbin, d.adrelid), "
+        "  'identity', NULLIF(a.attidentity::text, ''), 'generated', NULLIF(a.attgenerated::text, ''), "
         "  'comment', col_description(c.oid, a.attnum)) ORDER BY a.attnum) "
         "  FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum "
         "  WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped), "
@@ -293,7 +294,8 @@ std::string PostgreSQL::tableStructureJson(const std::string& qualifiedName) {
         "  FROM pg_constraint f WHERE f.conrelid = c.oid AND f.contype = 'f'), "
         "'constraints', (SELECT json_agg(json_build_object('name', o.conname, 'definition', pg_get_constraintdef(o.oid)) "
         "  ORDER BY o.conname) FROM pg_constraint o WHERE o.conrelid = c.oid AND o.contype IN ('c', 'u', 'x')), "
-        "'indexes', (SELECT json_agg(json_build_object('name', ic.relname, 'definition', pg_get_indexdef(i.indexrelid)) "
+        "'indexes', (SELECT json_agg(json_build_object('name', ic.relname, 'definition', pg_get_indexdef(i.indexrelid), "
+        "  'constraint', EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conindid = i.indexrelid AND k.conrelid = c.oid)) "
         "  ORDER BY ic.relname) FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid WHERE i.indrelid = c.oid)"
         ")::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = $1::regclass",
         {qualifiedName});

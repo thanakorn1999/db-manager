@@ -1,7 +1,8 @@
-// Unit checks always run; live checks run when DBM_TEST_PG / DBM_TEST_REDIS = "host:port".
+// Unit checks always run; live checks run when DBM_TEST_PG / DBM_TEST_REDIS = "host:port" (PG: optional "/database").
 #include "core/database/postgres/PostgreSQL.h"
 #include "core/database/redis/Redis.h"
 #include "core/export/Export.h"
+#include "core/import/Import.h"
 #include "core/query/SqlCompleter.h"
 
 #undef NDEBUG // CI builds Release: keep the asserts
@@ -12,7 +13,8 @@
 static ConnectionConfig fromEnv(const char* var, DbType type) {
     ConnectionConfig c;
     c.type = type;
-    std::string v = std::getenv(var);
+    std::string v = std::getenv(var); // host:port[/database]
+    if (size_t slash = v.find('/'); slash != std::string::npos) c.database = v.substr(slash + 1), v.erase(slash);
     c.host = v.substr(0, v.find(':'));
     c.port = std::stoi(v.substr(v.find(':') + 1));
     return c;
@@ -155,6 +157,68 @@ static void completerTests() {
     std::puts("completer ok");
 }
 
+static bool contains(const std::vector<Statement>& v, const std::string& part) {
+    for (auto& st : v)
+        if (st.sql.find(part) != std::string::npos) return true;
+    return false;
+}
+
+// every export format reads back to the same rows (NULL vs "" kept where the format can)
+static void importTests(const ResultSet& rs) {
+    auto one = [](const std::string& file, const std::string& bytes) {
+        auto t = Import::read(file, bytes);
+        assert(t.size() == 1);
+        return t[0];
+    };
+    auto csv = one("public.notes.csv", Export::csv(rs));
+    assert(csv.schema == "public" && csv.name == "notes" && csv.data.columns == rs.columns && csv.data.rows == rs.rows);
+    assert(one("x.csv", "\xEF\xBB\xBF" "a,b\n1,\"x\ny\"").data.rows[0][1] == "x\ny"); // BOM, LF, no final newline
+    bool err = false;
+    try { one("bad.csv", "a,b\r\n1\r\n"); } catch (const DbError& e) { err = std::string(e.what()).find("bad.csv: line 2") == 0; }
+    assert(err);
+
+    auto x = one("notes.xlsx", Export::xlsx(rs, "notes"));
+    assert(x.name == "notes" && x.data.columns == rs.columns && x.data.rows == rs.rows);
+
+    ResultSet j = rs;
+    j.columnType = {23, 25};
+    auto js = one("t.json", Export::json(j, R"({"schema": "s", "name": "n", "columns": [{"name": "id", "type": "integer"}, {"name": "note", "type": "text"}]})"));
+    assert(js.schema == "s" && js.name == "n" && js.data.rows == rs.rows && !js.structureJson.empty());
+    auto arr = one("copy.json", R"([{"b": true, "a": 1.5, "c": {"k": [1]}, "d": null}])");
+    assert(arr.data.columns == (std::vector<std::string>{"a", "b", "c", "d"}));
+    assert(arr.data.rows[0][0] == "1.5" && arr.data.rows[0][1] == "true" && arr.data.rows[0][2] == R"({"k":[1]})" && !arr.data.rows[0][3]);
+
+    auto zipped = Import::read("db.zip", Export::zip({{"public.a.csv", Export::csv(rs)}, {"__MACOSX/._x.csv", "junk"},
+                                                      {"sales.b.sql", "INSERT INTO sales.b VALUES (1);"}}));
+    assert(zipped.size() == 2 && zipped[0].name == "a" && zipped[0].data.rows == rs.rows && zipped[1].sql.size() > 0);
+
+    // structure: tables, then rows, then FKs / indexes; sequences moved past the ids
+    Import::Table t;
+    t.structureJson = R"J({"columns": [{"name": "id", "type": "integer", "nullable": false, "default": "nextval('t_id_seq'::regclass)"},
+        {"name": "n", "type": "integer", "generated": "s", "default": "(id * 2)"}, {"name": "u", "type": "integer"}],
+        "primaryKey": ["id"], "constraints": [{"name": "t_u_key", "definition": "UNIQUE (u)"}],
+        "foreignKeys": [{"name": "t_u_fkey", "definition": "FOREIGN KEY (u) REFERENCES t(id)"}],
+        "indexes": [{"name": "t_pkey", "definition": "CREATE UNIQUE INDEX t_pkey ON public.t USING btree (id)", "constraint": true},
+                    {"name": "t_n_idx", "definition": "CREATE INDEX t_n_idx ON public.t USING btree (n)", "constraint": false}]})J";
+    t.data.columns = {"id", "n", "u"};
+    t.data.rows = {{"1", "2", std::nullopt}, {"2", "4", "1"}};
+    auto p = Import::plan({{&t, "x", "t2"}}, true, true);
+    assert(p[0].sql == "SET LOCAL search_path TO \"x\", public");
+    assert(contains(p, "DROP TABLE IF EXISTS \"x\".\"t2\" CASCADE") && contains(p, "CREATE SEQUENCE IF NOT EXISTS t_id_seq"));
+    assert(contains(p, "\"n\" integer GENERATED ALWAYS AS ((id * 2)) STORED") && contains(p, "PRIMARY KEY (\"id\")"));
+    assert(contains(p, "INSERT INTO \"x\".\"t2\" (\"id\", \"u\") OVERRIDING SYSTEM VALUE VALUES\n('1', NULL),\n('2', '1')"));
+    assert(contains(p, "CREATE INDEX IF NOT EXISTS t_n_idx ON \"x\".\"t2\" USING btree (n)") && !contains(p, "t_pkey ON"));
+    auto at = [&](const std::string& part) {
+        for (size_t i = 0; i < p.size(); ++i)
+            if (p[i].sql.find(part) != std::string::npos) return i;
+        return p.size();
+    };
+    assert(at("CREATE TABLE") < at("INSERT INTO") && at("INSERT INTO") < at("ADD CONSTRAINT \"t_u_fkey\"") && at("setval('t_id_seq'") < p.size());
+    auto d = Import::plan({{&t, "public", "t"}}, false, false); // data only: no DDL
+    assert(!contains(d, "CREATE") && !contains(d, "search_path") && contains(d, "INSERT INTO \"public\".\"t\""));
+    std::puts("import ok");
+}
+
 int main() {
     completerTests();
     ResultSet rs;
@@ -189,6 +253,7 @@ int main() {
         assert(z.rfind("PK\x03\x04", 0) == 0 && z.find("ตาราง.csv") != std::string::npos);
         assert(z[6] == 0 && z[7] == 8); // UTF-8 name flag
     }
+    importTests(rs);
     rs.columnType = {23, 25}; // int4, text
     auto book = Export::xlsx(rs, "t");
     assert(book.compare(0, 4, "PK\x03\x04") == 0 && book.find("xl/worksheets/sheet1.xml") != std::string::npos);
@@ -242,6 +307,44 @@ int main() {
         pg.executeInTransaction({{"UPDATE " + tbl + " SET name = $1 WHERE id = $2", {std::nullopt, "1"}, true}});
         assert(!pg.execute("SELECT name FROM dbm_e WHERE id = 1").rows[0][0]);
         assert(PostgreSQL::quoteIdent("a\"b") == "\"a\"\"b\"");
+
+        // import round trip: export structure + rows, import into another schema, same rows and working defaults
+        pg.execute("DROP SCHEMA IF EXISTS dbm_src, dbm_dst CASCADE; CREATE SCHEMA dbm_src;"
+                   "CREATE TABLE dbm_src.parent(id serial PRIMARY KEY, name text NOT NULL CHECK (name <> ''));"
+                   "CREATE TABLE dbm_src.child(id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY, parent_id int REFERENCES dbm_src.parent(id),"
+                   " qty int, double_qty int GENERATED ALWAYS AS (qty * 2) STORED, doc jsonb, note text);"
+                   "CREATE INDEX child_qty_idx ON dbm_src.child(qty); COMMENT ON TABLE dbm_src.child IS 'kids';"
+                   "INSERT INTO dbm_src.parent(name) VALUES ('a'), ('b');"
+                   "INSERT INTO dbm_src.child(parent_id, qty, doc, note) VALUES (2, 3, '{\"k\": [1, 2]}', NULL), (1, 4, NULL, '')");
+        std::vector<Import::Table> files;
+        for (std::string name : {"child", "parent"}) { // FK child first: the plan orders it
+            std::string q = "dbm_src." + name;
+            auto data = pg.execute("SELECT * FROM " + q + " ORDER BY 1");
+            data.columnType = {}; // as text: what a CSV gives
+            for (auto& t : Import::read("dbm_src." + name + ".json", Export::json(data, pg.tableStructureJson(q)))) files.push_back(t);
+        }
+        std::vector<Import::Target> targets;
+        for (auto& f : files) targets.push_back({&f, "dbm_dst", f.name});
+        pg.executeInTransaction(Import::plan(targets, true, false));
+        for (std::string name : {"parent", "child"})
+            assert(pg.execute("SELECT * FROM dbm_src." + name + " ORDER BY 1").rows ==
+                   pg.execute("SELECT * FROM dbm_dst." + name + " ORDER BY 1").rows);
+        pg.execute("INSERT INTO dbm_dst.parent(name) VALUES ('c'); INSERT INTO dbm_dst.child(parent_id, qty) VALUES (3, 1)");
+        assert(*pg.execute("SELECT max(id) FROM dbm_dst.parent").rows[0][0] == "3"); // serial moved past the ids
+        assert(*pg.execute("SELECT max(id) FROM dbm_dst.child").rows[0][0] == "3");  // identity too
+        assert(*pg.execute("SELECT count(*) FROM pg_constraint WHERE conrelid = 'dbm_dst.child'::regclass AND contype = 'f'").rows[0][0] == "1");
+        assert(!pg.execute("SELECT 1 FROM pg_indexes WHERE schemaname = 'dbm_dst' AND indexname = 'child_qty_idx'").rows.empty());
+        assert(*pg.execute("SELECT obj_description('dbm_dst.child'::regclass)").rows[0][0] == "kids");
+        err = false; // all or nothing: a bad row rolls the whole import back
+        try { pg.executeInTransaction(Import::plan(targets, true, true)), pg.execute("SELECT 1"); } catch (const DbError&) { err = true; }
+        assert(!err); // dropFirst: importing again replaces the tables
+        Import::Table bad;
+        bad.data.columns = {"name"};
+        bad.data.rows = {{"x"}, {""}}; // breaks CHECK (name <> '')
+        err = false;
+        try { pg.executeInTransaction(Import::plan({{&bad, "dbm_dst", "parent"}}, false, false)); } catch (const DbError&) { err = true; }
+        assert(err && *pg.execute("SELECT count(*) FROM dbm_dst.parent").rows[0][0] == "2");
+        pg.execute("DROP SCHEMA dbm_src, dbm_dst CASCADE");
 
         // column types + PK / FK flags for colouring
         pg.execute("CREATE TEMP TABLE dbm_f(id int PRIMARY KEY, e_id int REFERENCES dbm_e, ok bool)");

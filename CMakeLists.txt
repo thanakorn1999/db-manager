@@ -28,6 +28,7 @@ add_library(dbcore STATIC
     src/core/connection/Session.h
     src/core/query/SqlCompleter.cpp
     src/core/export/Export.cpp
+    src/core/import/Import.cpp
 )
 target_include_directories(dbcore PUBLIC src)
 target_link_libraries(dbcore PUBLIC Qt6::Core PostgreSQL::PostgreSQL ${REDIS_LIBS} ZLIB::ZLIB)

@@ -3,9 +3,11 @@
 #include "core/connection/Session.h"
 #include "core/database/postgres/PostgreSQL.h"
 #include "core/database/redis/Redis.h"
+#include "core/import/Import.h"
 
 #include <QMainWindow>
 #include <map>
+#include <optional>
 
 class QPersistentModelIndex;
 class QStandardItem;
@@ -47,6 +49,14 @@ private:
     void openErDiagram();
     void backup();
     void exportTable();
+    // database / schema / table item: pick exported files, review where each goes, one transaction
+    void importData();
+    struct ImportChoice {
+        std::vector<Import::Target> targets;
+        bool structure = false, dropFirst = false;
+    };
+    std::optional<ImportChoice> pickImport(const std::vector<Import::Table>& files, const QString& db,
+                                           const QString& schema, const QString& table);
     void exportTables(const QString& conn, const QString& db, const QString& schema);
     struct Picked {
         QString ext; // csv, xlsx, json

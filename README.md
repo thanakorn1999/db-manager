@@ -34,7 +34,8 @@ browse and edit data, follow foreign keys, export, and look after Redis keys, al
 - **Filter and sort without losing the SQL**: ⌘F and header clicks write `WHERE` / `ORDER BY` into your query, so you always see what ran.
 - **Follow foreign keys**: click the → in an FK cell to open the parent row; the PK / FK ⋮ menu writes the `JOIN` for you.
 - **Copy as JSON / CSV / Markdown / SQL INSERT**: select cells, right-click.
-- **Export**: CSV, Excel (.xlsx), JSON (data + structure), SQL INSERTs; a whole database or schema into one `.zip`. Backup with `pg_dump`.
+- **Export / import**: CSV, Excel (.xlsx), JSON (data + structure), SQL INSERTs; a whole database or schema into one `.zip`,
+  and back again: import many files at once, into existing tables or creating them from the JSON structure. Backup with `pg_dump`.
 - **Safe drops**: dropping tables lists the tables whose foreign keys point at them (drop those too, or CASCADE); Drop Database confirms first.
 - **ER diagram** of a database, schema or table.
 - **Redis**: SCAN key browser with search, editors for string / hash / list / set / sorted set, TTL, rename, command editor.
@@ -168,6 +169,21 @@ Tables in the explorer get an emoji guessed from their name (`users` → 🧑, `
 ## Export
 
 Right-click a **table** → **Export…** saves that table (CSV / Excel / JSON / SQL INSERTs); the SQL tab's **Export…** saves its result grid the same way. Right-click a **database** or **schema** → **Export…**: pick the format (CSV / Excel / JSON), tick tables (or **Select all**), then either **One .zip file** (default) or, unticked, a folder with one file per table, `schema.table.ext` (you're asked before existing files are replaced). Save dialogs start in Downloads.
+
+## Import
+
+Right-click a **database**, **schema** or **table** → **Import…** and pick one or more files: anything Export writes
+(`.csv`, `.xlsx`, `.json`, `.sql`) or a `.zip` of them. A review lists each file, its row count and the table it goes
+into (`schema.table`, taken from the file name or the JSON structure; edit it, or clear it to skip the file). Then:
+
+- **Data**: rows are added to existing tables, columns matched by name.
+- **Data + structure**: the tables are created first. JSON exports bring the column types, defaults, NOT NULL,
+  primary / unique / check constraints, foreign keys, indexes and comments; CSV / Excel files get text columns.
+  Foreign keys between the imported tables follow them to the new schema. Optionally drop existing tables first.
+
+Everything runs in one transaction, so a bad row leaves the database untouched. Sequences behind `serial` / identity
+columns are moved past the imported ids. `.sql` files run as written. Excel: the first sheet, row 1 is the header,
+empty cells are NULL.
 
 ## Contributing
 

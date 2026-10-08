@@ -23,6 +23,10 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFileDialog>
+#include <QTableWidget>
+#include <QRadioButton>
+#include <QLabel>
+#include <QFileInfo>
 #include <QProcess>
 #include <QStandardPaths>
 #include <QHeaderView>
@@ -137,6 +141,7 @@ MainWindow::MainWindow() {
     auto* er = new QAction("ER Diagram", this); // right-click menu only
     auto* backupAct = new QAction("Backup (pg_dump)…", this);
     auto* exportAct = new QAction("Export…", this);
+    auto* importAct = new QAction("Import…", this);
     auto* refresh = toolbar->addAction(style()->standardIcon(QStyle::SP_BrowserReload), "Refresh");
     auto* disconnect = toolbar->addAction("Disconnect");
     toolbar->addSeparator();
@@ -183,7 +188,7 @@ MainWindow::MainWindow() {
     });
     delConn->setText("Delete Connection"); // the menu runs on any row; say what it deletes
     delConn->setIconText("Delete");
-    tree_->addActions({sql, er, backupAct, exportAct, setIcon, selectAll, dropAct, dropDb_, refresh, disconnect,
+    tree_->addActions({sql, er, backupAct, exportAct, importAct, setIcon, selectAll, dropAct, dropDb_, refresh, disconnect,
                        editConn, delConn});
 
     connect(newConn, &QAction::triggered, this, &MainWindow::newConnection);
@@ -193,6 +198,7 @@ MainWindow::MainWindow() {
     connect(er, &QAction::triggered, this, &MainWindow::openErDiagram);
     connect(backupAct, &QAction::triggered, this, &MainWindow::backup);
     connect(exportAct, &QAction::triggered, this, &MainWindow::exportTable);
+    connect(importAct, &QAction::triggered, this, &MainWindow::importData);
     connect(refresh, &QAction::triggered, this, [this] {
         if (auto* item = selectedItem(); item && item->hasChildren()) {
             resetChildren(item);
@@ -799,6 +805,142 @@ void MainWindow::exportTable() {
         [this](const QString& msg) {
             statusBar()->clearMessage();
             QMessageBox::warning(this, "Export failed", msg);
+        });
+}
+
+std::optional<MainWindow::ImportChoice> MainWindow::pickImport(const std::vector<Import::Table>& files, const QString& db,
+                                                               const QString& schema, const QString& table) {
+    QDialog dlg(this);
+    dlg.setWindowTitle("Import into " + db + (schema.isEmpty() ? "" : "." + schema));
+    auto* list = new QTableWidget(int(files.size()), 3);
+    list->setHorizontalHeaderLabels({"File", "Rows", "Into table"});
+    list->verticalHeader()->hide();
+    list->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    list->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    int dataFiles = int(std::count_if(files.begin(), files.end(), [](auto& f) { return f.sql.empty(); }));
+    for (int i = 0; i < int(files.size()); ++i) {
+        auto& f = files[i];
+        auto cell = [&](int col, const QString& text, bool editable) {
+            auto* it = new QTableWidgetItem(text);
+            if (!editable) it->setFlags(it->flags() & ~Qt::ItemIsEditable);
+            list->setItem(i, col, it);
+            return it;
+        };
+        cell(0, qs(f.file), false);
+        cell(1, f.sql.empty() ? QString::number(f.data.rows.size()) : "script", false);
+        if (!f.sql.empty()) {
+            cell(2, "tables named in the file", false)->setForeground(palette().color(QPalette::PlaceholderText));
+            continue;
+        }
+        // a schema / table that was right-clicked wins over the one in the file name
+        QString s = !schema.isEmpty() ? schema : !f.schema.empty() ? qs(f.schema) : "public";
+        QString n = !table.isEmpty() && dataFiles == 1 ? table : qs(f.name);
+        cell(2, s + "." + n, true)->setToolTip("schema.table; clear it to skip this file");
+    }
+    auto* dataOnly = new QRadioButton("Data: add the rows to existing tables (columns matched by name)");
+    auto* withStructure = new QRadioButton("Data + structure: create the tables first (JSON exports keep types, keys "
+                                           "and indexes; CSV / Excel get text columns)");
+    dataOnly->setChecked(true);
+    auto* drop = new QCheckBox("Drop tables that already exist first (CASCADE)");
+    drop->setEnabled(false);
+    connect(withStructure, &QRadioButton::toggled, drop, &QWidget::setEnabled);
+    auto* note = new QLabel("Everything runs in one transaction: if anything fails, nothing is imported. "
+                            ".sql files run as written.");
+    note->setWordWrap(true);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    buttons->button(QDialogButtonBox::Ok)->setText("Import");
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    auto* layout = new QVBoxLayout(&dlg);
+    layout->addWidget(list);
+    layout->addWidget(dataOnly);
+    layout->addWidget(withStructure);
+    layout->addWidget(drop);
+    layout->addWidget(note);
+    layout->addWidget(buttons);
+    dlg.resize(680, 440);
+    if (dlg.exec() != QDialog::Accepted) return std::nullopt;
+
+    ImportChoice c;
+    c.structure = withStructure->isChecked();
+    c.dropFirst = c.structure && drop->isChecked();
+    for (int i = 0; i < int(files.size()); ++i) {
+        if (!files[i].sql.empty()) {
+            c.targets.push_back({&files[i], {}, {}});
+            continue;
+        }
+        // ponytail: "schema.table" split at the first dot; a schema name containing a dot can't be typed
+        QString into = list->item(i, 2)->text().trimmed();
+        if (into.isEmpty()) continue;
+        int dot = into.indexOf('.');
+        QString s = dot < 0 ? (schema.isEmpty() ? "public" : schema) : into.left(dot), n = into.mid(dot + 1);
+        c.targets.push_back({&files[i], s.toStdString(), n.toStdString()});
+    }
+    if (c.targets.empty()) return std::nullopt;
+    if (c.dropFirst && QMessageBox::warning(this, "Import", "Tables that already exist are dropped (CASCADE) and created "
+                                                            "again; the rows in them now are lost.",
+                                            QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Ok)
+        return std::nullopt;
+    return c;
+}
+
+void MainWindow::importData() {
+    auto* item = selectedItem();
+    int kind = item ? item->data(RoleKind).toInt() : 0;
+    if (kind != PgDatabase && kind != PgSchema && kind != PgRelation) {
+        QMessageBox::information(this, "Import", "Right-click a PostgreSQL database, schema or table to import into it.");
+        return;
+    }
+    QString conn = item->data(RoleConn).toString(), db = item->data(RoleDb).toString();
+    QString schema = item->data(RoleSchema).toString(), table = kind == PgRelation ? item->data(RoleName).toString() : "";
+    auto* dbItem = kind == PgDatabase ? item : kind == PgSchema ? item->parent() : item->parent()->parent();
+    QPersistentModelIndex dbIdx(dbItem->index());
+    QStringList paths = QFileDialog::getOpenFileNames(this, "Import", exportDir(),
+                                                      "Exports (*.csv *.xlsx *.json *.sql *.zip);;All files (*)");
+    if (paths.isEmpty()) return;
+
+    using Files = std::shared_ptr<std::vector<Import::Table>>;
+    statusBar()->showMessage(QString("Reading %1 file(s)…").arg(paths.size()));
+    // ponytail: whole files in memory, parsed on the worker; fine for what fits in RAM twice
+    pgSession(conn, db).run(
+        this,
+        [paths](PostgreSQL&) {
+            auto files = std::make_shared<std::vector<Import::Table>>();
+            for (auto& p : paths) {
+                QFile f(p);
+                if (!f.open(QIODevice::ReadOnly)) throw DbError(p.toStdString() + ": " + f.errorString().toStdString());
+                for (auto& t : Import::read(QFileInfo(p).fileName().toStdString(), f.readAll().toStdString()))
+                    files->push_back(std::move(t));
+            }
+            return files;
+        },
+        [=, this](const Files& files) {
+            statusBar()->clearMessage();
+            auto choice = pickImport(*files, db, schema, table);
+            if (!choice) return;
+            size_t rows = 0;
+            for (auto& t : choice->targets) rows += t.table->data.rows.size();
+            statusBar()->showMessage(QString("Importing %1 rows…").arg(rows));
+            pgSession(conn, db).run(
+                this,
+                [files, c = *choice](PostgreSQL& pg) { pg.executeInTransaction(Import::plan(c.targets, c.structure, c.dropFirst)); },
+                [=, this, n = choice->targets.size()] {
+                    statusBar()->clearMessage();
+                    if (dbIdx.isValid()) { // new tables / schemas show up
+                        auto* d = model_->itemFromIndex(dbIdx);
+                        resetChildren(d);
+                        if (tree_->isExpanded(dbIdx) || tree_->rootIndex() == dbIdx) loadChildren(d);
+                    }
+                    QMessageBox::information(this, "Import", QString("Imported %1 rows from %2 file(s).").arg(rows).arg(n));
+                },
+                [this](const QString& msg) {
+                    statusBar()->clearMessage();
+                    QMessageBox::warning(this, "Import failed", msg + "\n\nNothing was imported.");
+                });
+        },
+        [this](const QString& msg) {
+            statusBar()->clearMessage();
+            QMessageBox::warning(this, "Import", msg);
         });
 }
 
