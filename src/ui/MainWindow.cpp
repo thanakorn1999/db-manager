@@ -78,6 +78,8 @@ MainWindow::MainWindow() {
             else
                 tree_->setCurrentIndex(idx);
         }
+        auto* item = selectedItem();
+        dropDb_->setVisible(item && item->data(RoleKind).toInt() == PgDatabase);
         QMenu::exec(tree_->actions(), tree_->viewport()->mapToGlobal(pos), nullptr, tree_);
     });
 
@@ -173,7 +175,15 @@ MainWindow::MainWindow() {
     dropAct->setShortcuts({QKeySequence(Qt::CTRL | Qt::Key_Backspace), QKeySequence::Delete});
     dropAct->setShortcutContext(Qt::WidgetShortcut);
     connect(dropAct, &QAction::triggered, this, &MainWindow::dropTables);
-    tree_->addActions({sql, er, backupAct, exportAct, setIcon, selectAll, dropAct, refresh, disconnect, editConn, delConn});
+    dropDb_ = new QAction("Drop Database…", this);
+    connect(dropDb_, &QAction::triggered, this, [this] {
+        if (auto* item = selectedItem(); item && item->data(RoleKind).toInt() == PgDatabase)
+            dropDatabase(item->data(RoleConn).toString(), item->data(RoleDb).toString(), false);
+    });
+    delConn->setText("Delete Connection"); // the menu runs on any row; say what it deletes
+    delConn->setIconText("Delete");
+    tree_->addActions({sql, er, backupAct, exportAct, setIcon, selectAll, dropAct, dropDb_, refresh, disconnect,
+                       editConn, delConn});
 
     connect(newConn, &QAction::triggered, this, &MainWindow::newConnection);
     connect(editConn, &QAction::triggered, this, &MainWindow::editConnection);
@@ -886,6 +896,53 @@ void MainWindow::runDrop(const QString& conn, const QString& db, const QPersiste
             box.setDefaultButton(QMessageBox::Cancel);
             box.exec();
             if (box.clickedButton() == retry) runDrop(conn, db, dbIdx, targets, true);
+        });
+}
+
+void MainWindow::dropDatabase(const QString& conn, const QString& db, bool force) {
+    QString via = defaultDb(configs_.at(conn));
+    if (db == via) {
+        QMessageBox::information(this, "Drop Database",
+                                 "\"" + db + "\" is the database this connection logs in to, so it can't drop it. "
+                                 "Edit the connection to use another database (e.g. postgres) first.");
+        return;
+    }
+    if (!force) {
+        QMessageBox box(QMessageBox::Warning, "Drop Database",
+                        "Drop database \"" + db + "\"? All its schemas, tables and data are deleted. "
+                        "This can't be undone.", QMessageBox::Cancel, this);
+        auto* drop = box.addButton("Drop Database", QMessageBox::DestructiveRole);
+        box.setDefaultButton(QMessageBox::Cancel);
+        box.exec();
+        if (box.clickedButton() != drop) return;
+    }
+    pgSessions_.erase(conn + '/' + db); // our own explorer connection would block the drop
+    statusBar()->showMessage("Dropping database " + db + "…");
+    std::string stmt = "DROP DATABASE " + PostgreSQL::quoteIdent(db.toStdString()) + (force ? " WITH (FORCE)" : "");
+    pgSession(conn, via).run(
+        this, [stmt](PostgreSQL& pg) { pg.execute(stmt); },
+        [=, this] {
+            statusBar()->showMessage("Dropped database " + db, 5000);
+            for (int r = 0; r < model_->rowCount(); ++r)
+                if (auto* c = model_->item(r); c->data(RoleConn).toString() == conn) {
+                    if (tree_->rootIndex().parent() == c->index()) leaveDatabase(); // re-list its databases
+                    resetChildren(c);
+                    if (tree_->isExpanded(c->index())) loadChildren(c);
+                }
+        },
+        [=, this](const QString& msg) {
+            statusBar()->clearMessage();
+            // open SQL tabs (or other clients) on it: PostgreSQL 13+ can disconnect them
+            if (force || !msg.contains("being accessed by other users")) {
+                QMessageBox::warning(this, "Drop failed", msg);
+                return;
+            }
+            QMessageBox box(QMessageBox::Warning, "Drop failed", msg, QMessageBox::Cancel, this);
+            box.setInformativeText("Disconnect those sessions (SQL tabs on it included) and drop anyway?");
+            auto* retry = box.addButton("Drop with FORCE", QMessageBox::DestructiveRole);
+            box.setDefaultButton(QMessageBox::Cancel);
+            box.exec();
+            if (box.clickedButton() == retry) dropDatabase(conn, db, true);
         });
 }
 

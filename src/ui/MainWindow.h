@@ -12,6 +12,7 @@ class QStandardItem;
 class QStandardItemModel;
 class QTabWidget;
 class QTreeView;
+class QAction;
 class QComboBox;
 class QToolButton;
 
@@ -53,6 +54,8 @@ private:
     void dropTables();
     void runDrop(const QString& conn, const QString& db, const QPersistentModelIndex& dbIdx,
                  const std::vector<DropTarget>& targets, bool cascade);
+    // force: WITH (FORCE), disconnecting other sessions on it (PostgreSQL 13+)
+    void dropDatabase(const QString& conn, const QString& db, bool force);
 
     ConnectionConfig configFor(const QString& connId, const QString& db = {});
     Session<PostgreSQL>& pgSession(const QString& connId, const QString& db);
@@ -64,6 +67,7 @@ private:
     QWidget* dbBar_;       // shown while inside a database: back + switch
     QToolButton* dbBack_;
     QComboBox* dbPick_;
+    QAction* dropDb_; // shown in the right-click menu on a database only
     QTabWidget* tabs_;
     int loadSeq_ = 0;
     std::map<QString, ConnectionConfig> configs_;
