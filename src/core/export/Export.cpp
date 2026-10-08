@@ -82,38 +82,6 @@ bool plainNumber(const std::string& v) {
 void put16(std::string& out, unsigned v) { out += char(v & 0xff), out += char(v >> 8 & 0xff); }
 void put32(std::string& out, unsigned long v) { put16(out, v & 0xffff), put16(out, v >> 16 & 0xffff); }
 
-// ponytail: in-memory, no zip64 (4 GB cap); fine for anything Excel can open anyway
-std::string zip(const std::vector<std::pair<std::string, std::string>>& files) {
-    std::string out, dir;
-    for (auto& [name, data] : files) {
-        z_stream z{};
-        deflateInit2(&z, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY); // raw deflate
-        std::string packed(deflateBound(&z, uLong(data.size())), '\0');
-        z.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(data.data()));
-        z.avail_in = uInt(data.size());
-        z.next_out = reinterpret_cast<Bytef*>(packed.data());
-        z.avail_out = uInt(packed.size());
-        deflate(&z, Z_FINISH);
-        packed.resize(z.total_out);
-        deflateEnd(&z);
-        unsigned long crc = crc32(0, reinterpret_cast<const Bytef*>(data.data()), uInt(data.size()));
-
-        auto common = [&](std::string& h) { // version, flags, method, time, date, crc, sizes, name length
-            put16(h, 20), put16(h, 0), put16(h, 8), put16(h, 0), put16(h, 0x21);
-            put32(h, crc), put32(h, packed.size()), put32(h, data.size()), put16(h, unsigned(name.size()));
-        };
-        put32(dir, 0x02014b50), put16(dir, 20), common(dir);
-        put16(dir, 0), put16(dir, 0), put16(dir, 0), put16(dir, 0), put32(dir, 0), put32(dir, out.size());
-        dir += name;
-        put32(out, 0x04034b50), common(out), put16(out, 0);
-        out += name + packed;
-    }
-    size_t dirAt = out.size();
-    out += dir;
-    put32(out, 0x06054b50), put16(out, 0), put16(out, 0), put16(out, unsigned(files.size())),
-        put16(out, unsigned(files.size())), put32(out, dir.size()), put32(out, dirAt), put16(out, 0);
-    return out;
-}
 
 // ",\n<indent>{...}" per row, typed as described for json()
 std::string jsonRows(const ResultSet& rs, const std::string& indent) {
@@ -138,6 +106,39 @@ std::string jsonRows(const ResultSet& rs, const std::string& indent) {
 }
 
 } // namespace
+
+// ponytail: in-memory, no zip64 (4 GB cap); fine for Excel files and table exports
+std::string zip(const std::vector<std::pair<std::string, std::string>>& files) {
+    std::string out, dir;
+    for (auto& [name, data] : files) {
+        z_stream z{};
+        deflateInit2(&z, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY); // raw deflate
+        std::string packed(deflateBound(&z, uLong(data.size())), '\0');
+        z.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(data.data()));
+        z.avail_in = uInt(data.size());
+        z.next_out = reinterpret_cast<Bytef*>(packed.data());
+        z.avail_out = uInt(packed.size());
+        deflate(&z, Z_FINISH);
+        packed.resize(z.total_out);
+        deflateEnd(&z);
+        unsigned long crc = crc32(0, reinterpret_cast<const Bytef*>(data.data()), uInt(data.size()));
+
+        auto common = [&](std::string& h) { // version, flags (UTF-8 names), method, time, date, crc, sizes, name length
+            put16(h, 20), put16(h, 0x800), put16(h, 8), put16(h, 0), put16(h, 0x21);
+            put32(h, crc), put32(h, packed.size()), put32(h, data.size()), put16(h, unsigned(name.size()));
+        };
+        put32(dir, 0x02014b50), put16(dir, 20), common(dir);
+        put16(dir, 0), put16(dir, 0), put16(dir, 0), put16(dir, 0), put32(dir, 0), put32(dir, out.size());
+        dir += name;
+        put32(out, 0x04034b50), common(out), put16(out, 0);
+        out += name + packed;
+    }
+    size_t dirAt = out.size();
+    out += dir;
+    put32(out, 0x06054b50), put16(out, 0), put16(out, 0), put16(out, unsigned(files.size())),
+        put16(out, unsigned(files.size())), put32(out, dir.size()), put32(out, dirAt), put16(out, 0);
+    return out;
+}
 
 std::string csv(const ResultSet& rs) {
     std::string out;

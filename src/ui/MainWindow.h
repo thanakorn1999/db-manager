@@ -48,8 +48,12 @@ private:
     void backup();
     void exportTable();
     void exportTables(const QString& conn, const QString& db, const QString& schema);
-    std::pair<QString, std::vector<std::pair<std::string, std::string>>>
-    pickTables(const std::vector<std::pair<std::string, std::string>>& tables, bool oneSchema);
+    struct Picked {
+        QString ext; // csv, xlsx, json
+        bool zip;    // one .zip instead of a file per table in a folder
+        std::vector<std::pair<std::string, std::string>> tables;
+    };
+    Picked pickTables(const std::vector<std::pair<std::string, std::string>>& tables, bool oneSchema);
     void selectAllTables();
     void dropTables();
     void runDrop(const QString& conn, const QString& db, const QPersistentModelIndex& dbIdx,

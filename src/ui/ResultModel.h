@@ -17,11 +17,17 @@ QAction* addCopyShortcut(QAbstractItemView* view);
 // Alternating row colours, a step stronger than the platform default (barely visible in dark mode).
 void setZebra(QAbstractItemView* view);
 
+// Where exports start: Downloads, else home.
+QString exportDir();
 // Save dialog for an export; empty if cancelled. .xlsx = Excel, .sql = INSERT statements, .json = data +
 // structure, anything else CSV.
 QString exportPath(QWidget* parent, const QString& baseName);
-// Writes rs to path (format by extension; table is used for INSERTs, structureJson for JSON).
-// Returns an error, empty on success. Plain file IO: safe on a worker thread.
+// rs in the format path's extension names (table is used for INSERTs, structureJson for JSON). Throws.
+std::string exportData(const QString& path, const ResultSet& rs, const std::string& table,
+                       const std::string& structureJson = {});
+// Returns an error, empty on success.
+QString writeFile(const QString& path, const std::string& data);
+// exportData() written to path. Returns an error, empty on success. Plain file IO: safe on a worker thread.
 QString writeExport(const QString& path, const ResultSet& rs, const std::string& table,
                     const std::string& structureJson = {});
 // The JSON export carries the table structure; fetch it (PostgreSQL::tableStructureJson) first.

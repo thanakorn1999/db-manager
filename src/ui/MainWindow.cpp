@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include "core/export/Export.h"
 #include "core/query/SqlCompleter.h"
 #include "ui/Settings.h"
 #include "ui/TableIcons.h"
@@ -567,7 +568,7 @@ void MainWindow::backup() {
     QString table = item->data(RoleKind).toInt() == PgRelation ? item->data(RoleName).toString() : QString();
     QString base = (table.isEmpty() ? (schema.isEmpty() ? db : db + "_" + schema) : table) + "_" +
                    QDateTime::currentDateTime().toString("yyyyMMdd_HHmm");
-    QString path = QFileDialog::getSaveFileName(this, "Backup", QDir::home().filePath(base + ".dump"),
+    QString path = QFileDialog::getSaveFileName(this, "Backup", QDir(exportDir()).filePath(base + ".dump"),
                                                 "pg_dump custom archive (*.dump);;Plain SQL (*.sql)");
     if (path.isEmpty()) return;
 
@@ -621,14 +622,16 @@ void MainWindow::backup() {
 
 // Format first, then tick the tables (with Select all). Returns the extension and the picked
 // tables as {schema, table}; empty if cancelled.
-std::pair<QString, std::vector<std::pair<std::string, std::string>>>
-MainWindow::pickTables(const std::vector<std::pair<std::string, std::string>>& tables, bool oneSchema) {
+MainWindow::Picked MainWindow::pickTables(const std::vector<std::pair<std::string, std::string>>& tables, bool oneSchema) {
     QDialog dlg(this);
     dlg.setWindowTitle("Export Tables");
     auto* format = new QComboBox;
     format->addItem("CSV (.csv)", "csv");
     format->addItem("Excel (.xlsx)", "xlsx");
     format->addItem("JSON: data + structure (.json)", "json");
+    auto* zip = new QCheckBox("One .zip file");
+    zip->setChecked(true);
+    zip->setToolTip("All tables in one .zip; off: one file per table in a folder");
     auto* all = new QCheckBox("Select all");
     auto* list = new QListWidget;
     for (auto& [schema, name] : tables) {
@@ -661,6 +664,7 @@ MainWindow::pickTables(const std::vector<std::pair<std::string, std::string>>& t
 
     auto* form = new QFormLayout;
     form->addRow("Format:", format);
+    form->addRow("", zip);
     auto* layout = new QVBoxLayout(&dlg);
     layout->addLayout(form);
     layout->addWidget(all);
@@ -672,7 +676,7 @@ MainWindow::pickTables(const std::vector<std::pair<std::string, std::string>>& t
     std::vector<std::pair<std::string, std::string>> picked;
     for (int i = 0; i < list->count(); ++i)
         if (list->item(i)->checkState() == Qt::Checked) picked.push_back(tables[i]);
-    return {format->currentData().toString(), picked};
+    return {format->currentData().toString(), zip->isChecked(), picked};
 }
 
 // database / schema item: tick tables, one file each in a chosen folder
@@ -692,44 +696,63 @@ void MainWindow::exportTables(const QString& conn, const QString& db, const QStr
                 QMessageBox::information(this, "Export Tables", "No tables in " + (schema.isEmpty() ? db : schema) + ".");
                 return;
             }
-            auto [ext, picked] = pickTables(tables, !schema.isEmpty());
+            auto [ext, zip, picked] = pickTables(tables, !schema.isEmpty());
             if (picked.empty()) return;
-            QString dir = QFileDialog::getExistingDirectory(this, "Export to folder", QDir::homePath());
-            if (dir.isEmpty()) return;
 
-            std::vector<std::pair<std::string, QString>> jobs; // quoted table, file path
-            QStringList existing;
-            for (auto& [s, t] : picked) {
-                QString file = QString(qs(s) + "." + qs(t) + "." + ext).replace('/', '_').replace(':', '_');
-                QString path = QDir(dir).filePath(file);
-                if (QFile::exists(path)) existing << file;
-                jobs.emplace_back(PostgreSQL::quoteIdent(s) + "." + PostgreSQL::quoteIdent(t), path);
+            std::vector<std::pair<std::string, QString>> jobs; // quoted table, file name
+            for (auto& [s, t] : picked)
+                jobs.emplace_back(PostgreSQL::quoteIdent(s) + "." + PostgreSQL::quoteIdent(t),
+                                  QString(qs(s) + "." + qs(t) + "." + ext).replace('/', '_').replace(':', '_'));
+            QString target; // the .zip, or the folder
+            if (zip) {
+                target = QFileDialog::getSaveFileName(this, "Export Tables",
+                                                      QDir(exportDir()).filePath(schema.isEmpty() ? db : schema),
+                                                      "Zip (*.zip)");
+                if (target.isEmpty()) return;
+                if (!target.endsWith(".zip", Qt::CaseInsensitive)) target += ".zip";
+            } else {
+                target = QFileDialog::getExistingDirectory(this, "Export to folder", exportDir());
+                if (target.isEmpty()) return;
+                QStringList existing;
+                for (auto& job : jobs)
+                    if (QFile::exists(QDir(target).filePath(job.second))) existing << job.second;
+                if (!existing.isEmpty() &&
+                    QMessageBox::question(this, "Export Tables",
+                                          QString("%1 file(s) already exist and will be replaced:\n%2")
+                                              .arg(existing.size())
+                                              .arg(existing.mid(0, 10).join('\n') + (existing.size() > 10 ? "\n…" : ""))) !=
+                        QMessageBox::Yes)
+                    return;
             }
-            if (!existing.isEmpty() &&
-                QMessageBox::question(this, "Export Tables",
-                                      QString("%1 file(s) already exist and will be replaced:\n%2")
-                                          .arg(existing.size())
-                                          .arg(existing.mid(0, 10).join('\n') + (existing.size() > 10 ? "\n…" : ""))) !=
-                    QMessageBox::Yes)
-                return;
 
             statusBar()->showMessage(QString("Exporting %1 tables…").arg(jobs.size()));
-            // ponytail: one table after another on the worker, no progress / cancel; add when exports get slow
+            // ponytail: one table after another on the worker, no progress / cancel; add when exports get slow.
+            // A .zip is built in memory: fine until a database is several GB.
             pgSession(conn, db).run(
                 this,
-                [jobs](PostgreSQL& pg) {
+                [jobs, zip, target](PostgreSQL& pg) {
                     size_t rows = 0;
-                    for (auto& [table, path] : jobs) {
+                    std::vector<std::pair<std::string, std::string>> files;
+                    for (auto& [table, file] : jobs) {
                         auto rs = pg.execute("SELECT * FROM " + table);
-                        QString err = writeExport(path, rs, table, isJsonExport(path) ? pg.tableStructureJson(table) : "");
-                        if (!err.isEmpty()) throw DbError(table + ": " + err.toStdString());
                         rows += rs.rows.size();
+                        try {
+                            auto data = exportData(file, rs, table, isJsonExport(file) ? pg.tableStructureJson(table) : "");
+                            if (zip) files.emplace_back(file.toStdString(), std::move(data));
+                            else if (QString err = writeFile(QDir(target).filePath(file), data); !err.isEmpty())
+                                throw DbError(err.toStdString());
+                        } catch (const std::exception& e) {
+                            throw DbError(table + ": " + e.what());
+                        }
                     }
+                    if (zip)
+                        if (QString err = writeFile(target, Export::zip(files)); !err.isEmpty())
+                            throw DbError(err.toStdString());
                     return rows;
                 },
-                [this, n = jobs.size(), dir](size_t rows) {
+                [this, n = jobs.size(), target](size_t rows) {
                     statusBar()->clearMessage();
-                    showSaved(this, QString("Exported %1 tables (%2 rows).").arg(n).arg(rows), dir);
+                    showSaved(this, QString("Exported %1 tables (%2 rows).").arg(n).arg(rows), target);
                 },
                 [this](const QString& msg) {
                     statusBar()->clearMessage();

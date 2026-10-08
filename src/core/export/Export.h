@@ -3,6 +3,8 @@
 #include "core/database/Database.h"
 
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace Export {
 
@@ -27,5 +29,8 @@ std::string jsonArray(const ResultSet& rs);
 
 // GitHub table: header + rows, NULL as NULL, | escaped, newlines as <br>.
 std::string markdown(const ResultSet& rs);
+
+// .zip bytes of {file name, contents}, deflated.
+std::string zip(const std::vector<std::pair<std::string, std::string>>& files);
 
 }

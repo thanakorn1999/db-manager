@@ -13,6 +13,7 @@
 #include <QDesktopServices>
 #include <QMessageBox>
 #include <QProcess>
+#include <QStandardPaths>
 #include <QPushButton>
 #include <QUrl>
 #include <QClipboard>
@@ -26,26 +27,46 @@
 #include <QGuiApplication>
 #include <algorithm>
 
+QString exportDir() {
+    QString dir = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+    return dir.isEmpty() ? QDir::homePath() : dir;
+}
+
 QString exportPath(QWidget* parent, const QString& baseName) {
-    return QFileDialog::getSaveFileName(parent, "Export", QDir::home().filePath(baseName + ".csv"),
-                                        "CSV (*.csv);;Excel (*.xlsx);;JSON: data + structure (*.json);;SQL INSERT statements (*.sql)");
+    // no extension in the default name: macOS appends the picked format's, so switching to Excel
+    // gives name.xlsx, not name.csv.xlsx
+    QString filter;
+    QString path = QFileDialog::getSaveFileName(
+        parent, "Export", QDir(exportDir()).filePath(baseName),
+        "CSV (*.csv);;Excel (*.xlsx);;JSON: data + structure (*.json);;SQL INSERT statements (*.sql)", &filter);
+    if (QString ext = filter.section("(*", 1); !path.isEmpty() && QFileInfo(path).suffix().isEmpty())
+        path += ext.isEmpty() ? QStringLiteral(".csv") : ext.chopped(1); // "CSV (*.csv)" -> .csv
+    return path;
+}
+
+std::string exportData(const QString& path, const ResultSet& rs, const std::string& table,
+                       const std::string& structureJson) {
+    if (path.endsWith(".sql", Qt::CaseInsensitive)) return Export::inserts(rs, table);
+    if (isJsonExport(path)) return Export::json(rs, structureJson);
+    if (path.endsWith(".xlsx", Qt::CaseInsensitive))
+        return Export::xlsx(rs, QFileInfo(path).completeBaseName().toStdString());
+    return Export::csv(rs);
+}
+
+QString writeFile(const QString& path, const std::string& data) {
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return f.errorString();
+    if (f.write(data.data(), qint64(data.size())) != qint64(data.size())) return f.errorString();
+    return {};
 }
 
 QString writeExport(const QString& path, const ResultSet& rs, const std::string& table,
                     const std::string& structureJson) {
-    QFile f(path);
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return f.errorString();
-    std::string data;
     try {
-        if (path.endsWith(".sql", Qt::CaseInsensitive)) data = Export::inserts(rs, table);
-        else if (isJsonExport(path)) data = Export::json(rs, structureJson);
-        else if (path.endsWith(".xlsx", Qt::CaseInsensitive)) data = Export::xlsx(rs, QFileInfo(path).completeBaseName().toStdString());
-        else data = Export::csv(rs);
+        return writeFile(path, exportData(path, rs, table, structureJson));
     } catch (const std::exception& e) {
         return e.what();
     }
-    if (f.write(data.data(), qint64(data.size())) != qint64(data.size())) return f.errorString();
-    return {};
 }
 
 void showSaved(QWidget* parent, const QString& message, const QString& path) {

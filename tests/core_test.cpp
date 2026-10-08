@@ -184,6 +184,11 @@ int main() {
     }
     assert(Export::markdown(rs) == "| id | note |\n| --- | --- |\n| 1 | a,b |\n| 2 | NULL |\n| 3 |  |\n"
                                    "| 4 | say \"hi\"<br>it's |\n");
+    {
+        auto z = Export::zip({{"ตาราง.csv", "id\r\n1\r\n"}});
+        assert(z.rfind("PK\x03\x04", 0) == 0 && z.find("ตาราง.csv") != std::string::npos);
+        assert(z[6] == 0 && z[7] == 8); // UTF-8 name flag
+    }
     rs.columnType = {23, 25}; // int4, text
     auto book = Export::xlsx(rs, "t");
     assert(book.compare(0, 4, "PK\x03\x04") == 0 && book.find("xl/worksheets/sheet1.xml") != std::string::npos);
