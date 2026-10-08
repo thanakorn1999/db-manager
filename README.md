@@ -1,6 +1,49 @@
-# DB Manager
+<p align="center">
+  <img src="resources/icon.png" width="128" alt="DB Manager icon">
+</p>
 
-Native desktop DB manager (PostgreSQL + Redis) — C++20 / Qt 6 Widgets / libpq / hiredis. See `project.md`.
+<h1 align="center">DB Manager</h1>
+
+<p align="center">
+  <b>A lightweight, native PostgreSQL + Redis client for macOS and Windows.</b><br>
+  No Electron, no JVM: just C++20 and Qt 6. Free and open source.
+</p>
+
+<p align="center">
+  <a href="https://github.com/thanakorn1999/db-manager/actions/workflows/windows.yml"><img src="https://github.com/thanakorn1999/db-manager/actions/workflows/windows.yml/badge.svg" alt="Windows build"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey.svg" alt="macOS | Windows">
+  <img src="https://img.shields.io/badge/C%2B%2B20-Qt%206-41cd52.svg" alt="C++20, Qt 6">
+</p>
+
+## Why
+
+GUI database tools tend to be either heavy (Electron / Java, seconds to start, hundreds of MB of RAM) or paid.
+DB Manager is a small native app that does the everyday work well: write SQL with smart autocomplete,
+browse and edit data, follow foreign keys, export, and look after Redis keys, all in one window.
+
+## Highlights
+
+- **SQL editor that knows your schema**: suggestions follow the clause you're in; after `JOIN`, tables
+  linked by a foreign key come first with the whole `ON` condition filled in. Unknown tables / columns get a yellow underline.
+- **Edit data in the grid**: change cells, add / delete rows (JOIN results too), ⌘Z undo, save in one transaction.
+- **Filter and sort without losing the SQL**: ⌘F and header clicks write `WHERE` / `ORDER BY` into your query, so you always see what ran.
+- **Follow foreign keys**: click the → in an FK cell to open the parent row; the PK / FK ⋮ menu writes the `JOIN` for you.
+- **Copy as JSON / CSV / Markdown / SQL INSERT**: select cells, right-click.
+- **Export**: CSV, Excel (.xlsx), JSON (data + structure), SQL INSERTs; a whole database or schema into one `.zip`. Backup with `pg_dump`.
+- **Safe drops**: dropping tables lists the tables whose foreign keys point at them (drop those too, or CASCADE); Drop Database confirms first.
+- **ER diagram** of a database, schema or table.
+- **Redis**: SCAN key browser with search, editors for string / hash / list / set / sorted set, TTL, rename, command editor.
+- **Explorer**: open a database like a folder, multi-select tables, emoji icons guessed from table names.
+- Passwords live in the OS keychain (macOS Keychain / Windows Credential Manager).
+
+## Get it
+
+- **Windows**: download the `db-manager-windows-x64` artifact from the latest green
+  [Windows build](https://github.com/thanakorn1999/db-manager/actions/workflows/windows.yml) run (needs a GitHub login), see [Prebuilt (CI)](#prebuilt-ci).
+- **macOS**: build from source with Homebrew (below). Signed releases are on the [roadmap](ROADMAP.md).
+
+Like it? A ⭐ helps other people find it. Ideas and bugs: [open an issue](https://github.com/thanakorn1999/db-manager/issues).
 
 ## Build (macOS)
 
@@ -82,7 +125,7 @@ The Redis live test uses DB 15 and runs `FLUSHDB` on it.
 | ⌘. | Cancel running query |
 | ⌘, | Settings (result grid colours) |
 | ⌃Space | SQL: show suggestions (they also pop up while typing; Tab / ↵ accepts, Esc closes) |
-| ⌘C | Copy selected cells (tab-separated) |
+| ⌘C | Copy selected cells (tab-separated); right-click → Copy as JSON / CSV / Markdown / SQL INSERT |
 | ⌘S | Save grid edits (SQL) / save string value (Redis) |
 | ⌘⌫ / Delete | SQL grid: mark selected rows for deletion (again to unmark) |
 | ⌘F | Redis: focus key pattern |
@@ -115,11 +158,11 @@ Tables in the explorer get an emoji guessed from their name (`users` → 🧑, `
 
 ## Export
 
-Right-click a **table** → **Export…** saves that table (CSV / Excel / JSON / SQL INSERTs). Right-click a **database** or **schema** → **Export…**: pick the format (CSV / Excel / JSON), tick tables (or **Select all**), then a folder: one file per table, `schema.table.ext`. You're asked before existing files are replaced.
+Right-click a **table** → **Export…** saves that table (CSV / Excel / JSON / SQL INSERTs); the SQL tab's **Export…** saves its result grid the same way. Right-click a **database** or **schema** → **Export…**: pick the format (CSV / Excel / JSON), tick tables (or **Select all**), then either **One .zip file** (default) or, unticked, a folder with one file per table, `schema.table.ext` (you're asked before existing files are replaced). Save dialogs start in Downloads.
 
-## Build and run
+## Contributing
 
-cmake --build build -j && open build/db-manager.app
+Pick an unchecked item in [ROADMAP.md](ROADMAP.md), open an issue to say you're on it, then send a PR. Code: `src/core` (database access, SQL completion, export; no Qt Widgets, unit-tested in `tests/core_test.cpp`) and `src/ui` (Qt Widgets).
 
 ## License
 
