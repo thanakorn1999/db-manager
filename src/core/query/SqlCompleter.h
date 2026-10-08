@@ -49,4 +49,11 @@ std::string addFilter(const std::string& sql, const SchemaInfo& schema, const st
                       const std::string& table, const std::string& column, const std::string& op,
                       const std::string& value);
 
+// sql with the ORDER BY of the statement naming table (the last statement when table is "") set to
+// result column `column` (by name, by position when the name repeats), replacing any ORDER BY there.
+// dir: ASC, DESC, or "" to remove it. Empty when the statement can't be found or isn't a query.
+std::string sortBy(const std::string& sql, const SchemaInfo& schema, const std::string& tableSchema,
+                   const std::string& table, const std::vector<std::string>& columns, size_t column,
+                   const std::string& dir);
+
 }

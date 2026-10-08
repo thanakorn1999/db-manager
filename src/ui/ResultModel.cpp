@@ -70,7 +70,7 @@ void setZebra(QAbstractItemView* view) {
     view->setAlternatingRowColors(true);
 }
 
-void addCopyShortcut(QAbstractItemView* view) {
+QAction* addCopyShortcut(QAbstractItemView* view) {
     auto* copy = new QAction("Copy", view);
     copy->setShortcut(QKeySequence::Copy);
     copy->setShortcutContext(Qt::WidgetShortcut);
@@ -88,6 +88,23 @@ void addCopyShortcut(QAbstractItemView* view) {
         QGuiApplication::clipboard()->setText(out);
     });
     view->addAction(copy);
+    return copy;
+}
+
+ResultSet ResultModel::selection(const QModelIndexList& indexes) const {
+    // ponytail: a ragged selection becomes its bounding rows x columns
+    std::set<int> rows, cols;
+    for (auto& i : indexes) rows.insert(i.row()), cols.insert(i.column());
+    ResultSet out;
+    for (int c : cols) {
+        out.columns.push_back(rs_.columns[c]);
+        out.columnType.push_back(size_t(c) < rs_.columnType.size() ? rs_.columnType[c] : 0);
+    }
+    for (int r : rows) {
+        auto& row = out.rows.emplace_back();
+        for (int c : cols) row.push_back(value(r, c));
+    }
+    return out;
 }
 
 void ResultModel::setResult(ResultSet rs) {

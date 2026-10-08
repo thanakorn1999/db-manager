@@ -115,6 +115,28 @@ std::string zip(const std::vector<std::pair<std::string, std::string>>& files) {
     return out;
 }
 
+// ",\n<indent>{...}" per row, typed as described for json()
+std::string jsonRows(const ResultSet& rs, const std::string& indent) {
+    auto kind = columnKinds(rs);
+    std::vector<std::string> keys;
+    for (auto& c : rs.columns) keys.push_back(jsonString(c) + ": ");
+    std::string out;
+    for (size_t r = 0; r < rs.rows.size(); ++r) {
+        out += (r ? ",\n" : "\n") + indent + "{";
+        for (size_t c = 0; c < rs.rows[r].size() && c < keys.size(); ++c) {
+            auto& v = rs.rows[r][c];
+            out += (c ? ", " : "") + keys[c];
+            if (!v) out += "null";
+            else if (kind[c] == 'n' && plainNumber(*v)) out += *v;
+            else if (kind[c] == 'b' && (*v == "t" || *v == "f")) out += *v == "t" ? "true" : "false";
+            else if (kind[c] == 'j') out += *v; // PostgreSQL only returns valid JSON for these
+            else out += jsonString(*v);
+        }
+        out += "}";
+    }
+    return out;
+}
+
 } // namespace
 
 std::string csv(const ResultSet& rs) {
@@ -238,24 +260,29 @@ std::string json(const ResultSet& rs, const std::string& structureJson) {
     } else {
         out += structureJson;
     }
-    out += ",\n  \"rows\": [";
-    auto kind = columnKinds(rs);
-    std::vector<std::string> keys;
-    for (auto& c : rs.columns) keys.push_back(jsonString(c) + ": ");
-    for (size_t r = 0; r < rs.rows.size(); ++r) {
-        out += r ? ",\n    {" : "\n    {";
-        for (size_t c = 0; c < rs.rows[r].size() && c < keys.size(); ++c) {
-            auto& v = rs.rows[r][c];
-            out += (c ? ", " : "") + keys[c];
-            if (!v) out += "null";
-            else if (kind[c] == 'n' && plainNumber(*v)) out += *v;
-            else if (kind[c] == 'b' && (*v == "t" || *v == "f")) out += *v == "t" ? "true" : "false";
-            else if (kind[c] == 'j') out += *v; // PostgreSQL only returns valid JSON for these
-            else out += jsonString(*v);
-        }
-        out += "}";
-    }
+    out += ",\n  \"rows\": [" + jsonRows(rs, "    ");
     out += rs.rows.empty() ? "]\n}\n" : "\n  ]\n}\n";
+    return out;
+}
+
+std::string jsonArray(const ResultSet& rs) {
+    return "[" + jsonRows(rs, "  ") + (rs.rows.empty() ? "]\n" : "\n]\n");
+}
+
+std::string markdown(const ResultSet& rs) {
+    auto cell = [](const std::string& s) {
+        std::string out;
+        for (char ch : s) out += ch == '|' ? "\\|" : ch == '\n' ? "<br>" : ch == '\r' ? "" : std::string(1, ch);
+        return out;
+    };
+    std::string out = "|", rule = "|";
+    for (auto& c : rs.columns) out += " " + cell(c) + " |", rule += " --- |";
+    out += "\n" + rule + "\n";
+    for (auto& row : rs.rows) {
+        out += "|";
+        for (auto& v : row) out += " " + (v ? cell(*v) : "NULL") + " |";
+        out += "\n";
+    }
     return out;
 }
 

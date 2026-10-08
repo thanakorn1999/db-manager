@@ -4,6 +4,7 @@
 #include "core/export/Export.h"
 #include "core/query/SqlCompleter.h"
 
+#undef NDEBUG // CI builds Release: keep the asserts
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
@@ -77,6 +78,21 @@ static void completerTests() {
     assert(f("SELECT * FROM users u JOIN orders o ON o.user_id = u.id WHERE u.id = 1", "total", "contains", "it's") ==
            "SELECT * FROM users u JOIN orders o ON o.user_id = u.id WHERE u.id = 1 AND o.total::text ILIKE '%it''s%'");
     assert(f("SELECT * FROM users", "id", "=", "1").empty());
+    assert(f("SELECT * FROM orders;", "id", "=", "1") == "SELECT * FROM orders WHERE id = '1';");
+    // sort: ORDER BY set / replaced / removed on the statement naming the table, before LIMIT
+    std::vector<std::string> cols{"id", "user_id", "total", "id"};
+    auto o = [&](const std::string& sql, size_t col, const std::string& dir, const std::string& table = "orders") {
+        return SqlCompleter::sortBy(sql, s, "public", table, cols, col, dir);
+    };
+    assert(o("SELECT * FROM orders LIMIT 100;", 2, "ASC") == "SELECT * FROM orders ORDER BY total LIMIT 100;");
+    assert(o("SELECT * FROM orders WHERE x = 1 ORDER BY id DESC LIMIT 5", 1, "DESC") ==
+           "SELECT * FROM orders WHERE x = 1 ORDER BY user_id DESC LIMIT 5");
+    assert(o("SELECT * FROM orders ORDER BY id LIMIT 5", 1, "") == "SELECT * FROM orders LIMIT 5");
+    assert(o("SELECT * FROM orders", 0, "ASC") == "SELECT * FROM orders ORDER BY 1"); // id twice: position
+    assert(o("SELECT * FROM (SELECT * FROM orders ORDER BY id) x;", 2, "DESC") ==
+           "SELECT * FROM (SELECT * FROM orders ORDER BY id) x ORDER BY total DESC;");
+    assert(o("SELECT 1; SELECT 2 AS total -- c", 2, "ASC", "") == "SELECT 1; SELECT 2 AS total ORDER BY total -- c");
+    assert(o("DELETE FROM orders RETURNING *", 2, "ASC").empty());
     r = comp("SELECT * FROM mix", s);
     assert(r.items.size() == 1 && r.items[0].label == "\"Mixed Case\"");
 
@@ -159,9 +175,15 @@ int main() {
                "{\"name\": \"name\"}, {\"name\": \"big\"}]},\n  \"rows\": [\n"
                "    {\"id\": 1, \"ok\": true, \"doc\": {\"a\": [1]}, \"name\": \"say \\\"hi\\\"\\n\\u0001\", \"big\": \"12345678901234567\"},\n"
                "    {\"id\": 2, \"ok\": null, \"doc\": null, \"name\": \"\", \"big\": 7}\n  ]\n}\n");
+        assert(Export::jsonArray(j) ==
+               "[\n  {\"id\": 1, \"ok\": true, \"doc\": {\"a\": [1]}, \"name\": \"say \\\"hi\\\"\\n\\u0001\", \"big\": \"12345678901234567\"},\n"
+               "  {\"id\": 2, \"ok\": null, \"doc\": null, \"name\": \"\", \"big\": 7}\n]\n");
         j.rows.clear();
+        assert(Export::jsonArray(j) == "[]\n");
         assert(Export::json(j, "{\"name\": \"t\"}") == "{\n  \"structure\": {\"name\": \"t\"},\n  \"rows\": []\n}\n");
     }
+    assert(Export::markdown(rs) == "| id | note |\n| --- | --- |\n| 1 | a,b |\n| 2 | NULL |\n| 3 |  |\n"
+                                   "| 4 | say \"hi\"<br>it's |\n");
     rs.columnType = {23, 25}; // int4, text
     auto book = Export::xlsx(rs, "t");
     assert(book.compare(0, 4, "PK\x03\x04") == 0 && book.find("xl/worksheets/sheet1.xml") != std::string::npos);

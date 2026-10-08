@@ -1,6 +1,7 @@
 #include "SqlEditorTab.h"
 
 #include "core/query/SqlCompleter.h"
+#include "core/export/Export.h"
 #include "ui/ResultModel.h"
 
 #include <QAbstractItemView>
@@ -10,6 +11,8 @@
 #include <QStyledItemDelegate>
 #include <QToolTip>
 #include <QAction>
+#include <QClipboard>
+#include <QGuiApplication>
 #include <QComboBox>
 #include <QCompleter>
 #include <QLineEdit>
@@ -91,15 +94,18 @@ public:
     }
     std::function<bool(int)> hasMenu;
     std::function<void(int, QPoint)> openMenu; // section, global position below the ⋮
+    std::function<QString(int)> sortMark; // ▲ / ▼ / "", drawn left of the ⋮
 
 protected:
     void paintSection(QPainter* p, const QRect& rect, int section) const override {
         p->save();
         QHeaderView::paintSection(p, rect, section);
         p->restore();
-        if (!hasMenu(section)) return;
+        bool menu = hasMenu(section);
         p->setPen(palette().color(QPalette::Link));
-        p->drawText(menuRect(rect), Qt::AlignCenter, QStringLiteral("⋮"));
+        if (QString mark = sortMark(section); !mark.isEmpty())
+            p->drawText(menuRect(rect).translated(menu ? -14 : 0, 0), Qt::AlignCenter, mark);
+        if (menu) p->drawText(menuRect(rect), Qt::AlignCenter, QStringLiteral("⋮"));
     }
 
     void mousePressEvent(QMouseEvent* e) override {
@@ -211,7 +217,7 @@ SqlEditorTab::SqlEditorTab(const ConnectionConfig& cfg, const QString& sql, bool
     model_ = new ResultModel(this);
     table_ = new QTableView;
     table_->setModel(model_);
-    addCopyShortcut(table_);
+    auto* copy = addCopyShortcut(table_);
     setZebra(table_);
     // FK arrow: SELECT the parent row(s) in a new tab
     auto* fkDelegate = new ForeignKeyDelegate(model_, table_);
@@ -256,6 +262,9 @@ SqlEditorTab::SqlEditorTab(const ConnectionConfig& cfg, const QString& sql, bool
         menu.exec(at);
     };
     table_->setHorizontalHeader(header);
+    header->sortMark = [this](int col) { return col != sortColumn_ ? QString() : sortDesc_ ? "▼" : "▲"; };
+    header->setToolTip("Click a column to sort: ▲, ▼, off");
+    connect(header, &QHeaderView::sectionClicked, this, &SqlEditorTab::sortBy);
     table_->setWordWrap(false);
     table_->horizontalHeader()->setDefaultSectionSize(140);
     table_->verticalHeader()->setDefaultSectionSize(22);
@@ -365,33 +374,48 @@ SqlEditorTab::SqlEditorTab(const ConnectionConfig& cfg, const QString& sql, bool
         setSql(filterBase_);
         filterBase_ = QString();
         clearFilter_->setEnabled(false);
+        sortColumn_ = -1; // the restored SQL has no ORDER BY of ours
         execute(editor_->toPlainText().trimmed());
     });
 
-    // right-click a cell: filter on its value
+    // right-click a cell: copy the selection in a format, filter on its value
     table_->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(table_, &QWidget::customContextMenuRequested, this, [this](QPoint pos) {
+    connect(table_, &QWidget::customContextMenuRequested, this, [this, copy](QPoint pos) {
         auto index = table_->indexAt(pos);
+        if (!index.isValid()) return;
         const auto& rs = model_->result();
-        if (!index.isValid() || size_t(index.column()) >= rs.sources.size() || rs.sources[index.column()].table.empty())
-            return;
         int col = index.column();
-        QString name = QString::fromStdString(rs.columns[col]);
         QMenu menu;
-        auto add = [&](const QString& label, const QString& op, const QString& value) {
-            connect(menu.addAction(label), &QAction::triggered, this, [=, this] { applyFilter(col, op, value); });
+        menu.addAction(copy);
+        auto* copyAs = menu.addMenu("Copy as");
+        auto addCopy = [&](const QString& label, std::function<std::string(const ResultSet&)> format) {
+            connect(copyAs->addAction(label), &QAction::triggered, this, [this, format] {
+                auto sel = model_->selection(table_->selectionModel()->selectedIndexes());
+                QGuiApplication::clipboard()->setText(QString::fromStdString(format(sel)));
+            });
         };
-        if (model_->isNull(index)) {
-            add(name + " IS NULL", "IS NULL", {});
-            add(name + " IS NOT NULL", "IS NOT NULL", {});
-        } else {
-            QString v = index.data(Qt::EditRole).toString();
-            QString shown = fontMetrics().elidedText(v.simplified(), Qt::ElideRight, 200);
-            add(name + " = " + shown, "=", v);
-            add(name + " <> " + shown, "<>", v);
+        addCopy("JSON", Export::jsonArray);
+        addCopy("CSV", Export::csv);
+        addCopy("Markdown", Export::markdown);
+        addCopy("SQL INSERT", [this](const ResultSet& sel) { return Export::inserts(sel, insertTable()); });
+        if (size_t(col) < rs.sources.size() && !rs.sources[col].table.empty()) {
+            menu.addSeparator();
+            QString name = QString::fromStdString(rs.columns[col]);
+            auto add = [&](const QString& label, const QString& op, const QString& value) {
+                connect(menu.addAction(label), &QAction::triggered, this, [=, this] { applyFilter(col, op, value); });
+            };
+            if (model_->isNull(index)) {
+                add(name + " IS NULL", "IS NULL", {});
+                add(name + " IS NOT NULL", "IS NOT NULL", {});
+            } else {
+                QString v = index.data(Qt::EditRole).toString();
+                QString shown = fontMetrics().elidedText(v.simplified(), Qt::ElideRight, 200);
+                add(name + " = " + shown, "=", v);
+                add(name + " <> " + shown, "<>", v);
+            }
+            menu.addSeparator();
+            connect(menu.addAction("Filter…\t⌘F"), &QAction::triggered, this, [this, col] { showFilterBar(col); });
         }
-        menu.addSeparator();
-        connect(menu.addAction("Filter…\t⌘F"), &QAction::triggered, this, [this, col] { showFilterBar(col); });
         menu.exec(table_->viewport()->mapToGlobal(pos));
     });
 
@@ -443,9 +467,7 @@ SqlEditorTab::SqlEditorTab(const ConnectionConfig& cfg, const QString& sql, bool
         QString base = oneTable ? QString::fromStdString(target_.table) : "result";
         QString path = exportPath(this, base);
         if (path.isEmpty()) return;
-        std::string table = !oneTable ? "table_name"
-                                                  : PostgreSQL::quoteIdent(target_.schema) + "." +
-                                                        PostgreSQL::quoteIdent(target_.table);
+        std::string table = insertTable();
         // ponytail: exports the rows as loaded, not pending grid edits
         auto finish = [this, path, table, rs](const std::string& structure) {
             QString err = writeExport(path, rs, table, structure);
@@ -521,6 +543,7 @@ void SqlEditorTab::runQuery() {
                                          : editor_->toPlainText()).trimmed();
     if (sql.isEmpty() || !confirmDiscard()) return;
     filterBase_ = QString(); // SQL run by hand: Clear mustn't bring back an older text
+    sortColumn_ = -1;
     clearFilter_->setEnabled(false);
     execute(sql);
 }
@@ -565,6 +588,30 @@ void SqlEditorTab::applyFilter(int column, const QString& op, const QString& val
     if (!confirmDiscard()) return;
     if (filterBase_.isNull()) filterBase_ = text;
     clearFilter_->setEnabled(true);
+    setSql(QString::fromStdString(sql));
+    execute(editor_->toPlainText().trimmed());
+}
+
+// header click: ASC, then DESC, then no ORDER BY
+void SqlEditorTab::sortBy(int column) {
+    const auto& rs = model_->result();
+    if (size_t(column) >= rs.columns.size()) return;
+    bool same = column == sortColumn_;
+    std::string dir = !same ? "ASC" : !sortDesc_ ? "DESC" : "";
+    // the statement to edit: the one naming a table this column (or any column) came from
+    ResultSet::Source src;
+    if (size_t(column) < rs.sources.size()) src = rs.sources[column];
+    for (auto& s : rs.sources)
+        if (src.table.empty()) src = s;
+    std::string sql = SqlCompleter::sortBy(editor_->toPlainText().toStdString(), schema_, src.schema, src.table,
+                                           rs.columns, column, dir);
+    if (sql.empty()) {
+        showError("Can't sort: only a SELECT can get an ORDER BY, and the SQL must name the table this grid came from");
+        return;
+    }
+    if (!confirmDiscard()) return;
+    sortColumn_ = dir.empty() ? -1 : column;
+    sortDesc_ = dir == "DESC";
     setSql(QString::fromStdString(sql));
     execute(editor_->toPlainText().trimmed());
 }
@@ -775,4 +822,10 @@ void SqlEditorTab::updateWarnings() {
         marks.append(m);
     }
     editor_->setExtraSelections(marks);
+}
+
+std::string SqlEditorTab::insertTable() const {
+    bool oneTable = !target_.table.empty() && !target_.joined; // a JOIN's rows don't fit one table
+    return oneTable ? PostgreSQL::quoteIdent(target_.schema) + "." + PostgreSQL::quoteIdent(target_.table)
+                    : "table_name";
 }

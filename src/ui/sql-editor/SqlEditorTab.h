@@ -35,9 +35,13 @@ private:
     // ANDs "column op value" into the SQL's WHERE and runs it (see SqlCompleter::addFilter)
     void applyFilter(int column, const QString& op, const QString& value);
     void showFilterBar(int column);
+    // header click: ORDER BY that result column in the SQL and run it (see SqlCompleter::sortBy)
+    void sortBy(int column);
     void fillFilterColumns();
     void execute(const QString& sql, const QString& note = {});
     void save();
+    // quoted schema.table for INSERTs, "table_name" when the result isn't one table
+    std::string insertTable() const;
     void setRunning(bool running);
     void updateEditActions();
     void showError(const QString& msg);
@@ -70,6 +74,8 @@ private:
     QLineEdit* filterValue_;
     QAction* clearFilter_;
     QString filterBase_; // the SQL before the first filter; null = not filtered
+    int sortColumn_ = -1; // result column of the ORDER BY a header click wrote; -1 = none
+    bool sortDesc_ = false;
     bool running_ = false;
     QString lastSql_;
     EditTarget target_;

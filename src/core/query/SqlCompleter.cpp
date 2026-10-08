@@ -599,7 +599,9 @@ size_t clauseEnd(const std::vector<Token>& toks, size_t i) {
 std::string insertBefore(const std::string& sql, const std::vector<Token>& toks, size_t i, const std::string& text) {
     if (i == toks.size()) return sql.substr(0, toks.back().end) + " " + text + sql.substr(toks.back().end);
     size_t at = toks[i].pos;
-    return sql.substr(0, at) + text + (sql[at - 1] == '\n' ? "\n" : " ") + sql.substr(at);
+    std::string before = std::isspace((unsigned char)sql[at - 1]) ? "" : " "; // "orders;"
+    std::string after = toks[i].punct(';') || toks[i].punct(')') ? "" : sql[at - 1] == '\n' ? "\n" : " ";
+    return sql.substr(0, at) + before + text + after + sql.substr(at);
 }
 
 std::string literal(const std::string& v) {
@@ -684,6 +686,37 @@ std::string addFilter(const std::string& sql, const SchemaInfo& schema, const st
     size_t condFrom = toks[where + 1].pos, condTo = toks[end - 1].end;
     std::string cond = sql.substr(condFrom, condTo - condFrom);
     return sql.substr(0, condFrom) + (hasOr ? "(" + cond + ")" : cond) + " AND " + test + sql.substr(condTo);
+}
+
+std::string sortBy(const std::string& sql, const SchemaInfo& schema, const std::string& tableSchema,
+                   const std::string& table, const std::vector<std::string>& columns, size_t column,
+                   const std::string& dir) {
+    auto l = locate(sql, schema, tableSchema, table);
+    const auto& toks = l.toks;
+    if (toks.empty() || column >= columns.size() || (!table.empty() && !l.ref)) return {};
+    size_t start = 0, anchor = l.ref ? l.tok : toks.size() - 1;
+    for (size_t i = 0; i < anchor; ++i)
+        if (toks[i].punct(';') && i + 1 < toks.size()) start = i + 1;
+    if (!toks[start].is("SELECT") && !toks[start].is("WITH") && !toks[start].is("VALUES") && !toks[start].is("TABLE"))
+        return {};
+    // top-level clauses until ORDER / LIMIT / … or the statement's end; after a UNION it sorts the whole
+    size_t i = start;
+    do i = clauseEnd(toks, i + 1);
+    while (i < toks.size() && toks[i].kind == Token::Word &&
+           !(toks[i].is("ORDER") || toks[i].is("LIMIT") || toks[i].is("OFFSET") || toks[i].is("FETCH") ||
+             toks[i].is("FOR") || toks[i].is("RETURNING")));
+    if (i < toks.size() && toks[i].is("RETURNING")) return {};
+
+    // output name: works for aliases and computed columns; a repeated name (JOIN: id, id) needs its position
+    std::string term = std::count(columns.begin(), columns.end(), columns[column]) == 1 ? quoteIdent(columns[column])
+                                                                                         : std::to_string(column + 1);
+    std::string clause = dir.empty() ? "" : "ORDER BY " + term + (dir == "DESC" ? " DESC" : "");
+    if (i < toks.size() && toks[i].is("ORDER")) {
+        size_t end = clauseEnd(toks, i + 1);
+        size_t from = clause.empty() ? toks[i - 1].end : toks[i].pos; // removing: the space before it too
+        return sql.substr(0, from) + clause + sql.substr(toks[end - 1].end);
+    }
+    return clause.empty() ? sql : insertBefore(sql, toks, i, clause);
 }
 
 std::vector<std::pair<size_t, size_t>> unknownNames(const std::string& sql, const SchemaInfo& schema) {

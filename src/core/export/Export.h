@@ -22,4 +22,10 @@ std::string xlsx(const ResultSet& rs, const std::string& sheetName);
 // numbers (up to 15 digits), booleans, json / jsonb embedded, NULL as null, the rest strings.
 std::string json(const ResultSet& rs, const std::string& structureJson);
 
+// Just the rows of json(): [{column: value}, ...], same value typing.
+std::string jsonArray(const ResultSet& rs);
+
+// GitHub table: header + rows, NULL as NULL, | escaped, newlines as <br>.
+std::string markdown(const ResultSet& rs);
+
 }

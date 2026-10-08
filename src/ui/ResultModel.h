@@ -9,10 +9,11 @@
 #include <set>
 
 class QAbstractItemView;
+class QAction;
 namespace Settings { enum class CellRole; }
 
-// ⌘C / Ctrl+C on the view copies the selected cells as TSV.
-void addCopyShortcut(QAbstractItemView* view);
+// ⌘C / Ctrl+C on the view copies the selected cells as TSV; returns that action.
+QAction* addCopyShortcut(QAbstractItemView* view);
 // Alternating row colours, a step stronger than the platform default (barely visible in dark mode).
 void setZebra(QAbstractItemView* view);
 
@@ -45,6 +46,8 @@ public:
 
     void setResult(ResultSet rs); // also clears edits and editability
     const ResultSet& result() const { return rs_; }
+    // The selected rows x selected columns (current values, edits included) as a result of their own.
+    ResultSet selection(const QModelIndexList& indexes) const;
     // index into result().foreignRefs for a column that's part of a navigable FK, else -1
     int foreignRefFor(int col) const;
     bool isNull(const QModelIndex& index) const { return !value(index.row(), index.column()); }

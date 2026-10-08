@@ -6,16 +6,18 @@ Want to help? Pick an unchecked item, open an issue to say you're on it, then se
 ## Done
 
 - PostgreSQL: connections, database / schema / table explorer, SQL editor (tabs, highlighting, context-aware autocomplete, cancel)
-- PostgreSQL data: edit cells, insert / delete rows in one transaction, FK jump to parent row, column tags (PK / FK / UNIQUE / INDEX)
+- PostgreSQL data: edit cells, insert / delete rows in one transaction (JOIN results too, for the FROM table), ⌘Z undo, FK jump to parent row, column tags (PK / FK / UNIQUE / INDEX)
+- Result grid: filter bar (⌘F) and click-to-sort, both written into the SQL as WHERE / ORDER BY; PK / FK ⋮ menu adds the JOIN; ⌘R re-runs; right-click Copy as JSON / CSV / Markdown / SQL INSERT
+- Explorer: open a database like a folder; multi-select tables, ⌘A selects a schema's tables, ⌘⌫ drops them (FK-aware: drop referencing tables too, or CASCADE)
 - Redis: connections, DB selection, SCAN key browser + search, viewers / editors for string, hash, list, set, sorted set, TTL, rename, delete, command editor
 - Export: CSV, Excel (.xlsx), JSON (data + structure), SQL INSERTs; whole database / schema to one file per table
 - Backup: `pg_dump`
+- Windows build (vcpkg), GitHub Actions CI
 - ER diagram, table icons, Settings (grid colours), passwords in the OS keychain
 
 ## Next — PostgreSQL data
 
 - [ ] Pagination for big tables (single-row mode instead of loading the whole result)
-- [ ] Search / filter / sort in the result grid
 - [ ] Query history
 - [ ] Restore (`pg_restore` / run .sql)
 - [ ] Import CSV
@@ -47,6 +49,6 @@ Want to help? Pick an unchecked item, open an issue to say you're on it, then se
 
 ## Platforms
 
-- [ ] Windows and Linux builds (vcpkg)
-- [ ] CI (build + tests on push)
+- [ ] Linux build
+- [ ] CI for macOS / Linux, live PostgreSQL / Redis checks in CI
 - [ ] Signed release builds
