@@ -43,11 +43,15 @@ add_executable(db-manager WIN32 MACOSX_BUNDLE # WIN32: no console window
     src/ui/sql-editor/SqlEditorTab.cpp
     src/ui/redis/RedisTab.cpp
     src/ui/er-diagram/ErDiagram.cpp
+    resources/icon.icns # app icon: python3 resources/make_icon.py redraws icon.png / .icns / .ico
+    $<$<PLATFORM_ID:Windows>:resources/icon.rc>
 )
+set_source_files_properties(resources/icon.icns PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
 target_link_libraries(db-manager PRIVATE dbcore Qt6::Widgets Qt6Keychain::Qt6Keychain)
 # macOS won't show native open / save panels (Export, Backup) for an app with an empty bundle id
 set_target_properties(db-manager PROPERTIES MACOSX_BUNDLE_GUI_IDENTIFIER com.jamezarkk.db-manager
-                                            MACOSX_BUNDLE_BUNDLE_NAME "DB Manager")
+                                            MACOSX_BUNDLE_BUNDLE_NAME "DB Manager"
+                                            MACOSX_BUNDLE_ICON_FILE icon.icns)
 
 enable_testing()
 add_executable(core_test tests/core_test.cpp)
