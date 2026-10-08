@@ -16,6 +16,10 @@
   <img src="https://img.shields.io/badge/C%2B%2B20-Qt%206-41cd52.svg" alt="C++20, Qt 6">
 </p>
 
+<p align="center">
+  <img src="docs/screenshot.png" width="900" alt="DB Manager: explorer and a SQL tab with an editable result grid">
+</p>
+
 ## Why
 
 GUI database tools tend to be either heavy (Electron / Java, seconds to start, hundreds of MB of RAM) or paid.
@@ -39,9 +43,14 @@ browse and edit data, follow foreign keys, export, and look after Redis keys, al
 
 ## Get it
 
-- **Windows**: download the `db-manager-windows-x64` artifact from the latest green
-  [Windows build](https://github.com/thanakorn1999/db-manager/actions/workflows/windows.yml) run (needs a GitHub login), see [Prebuilt (CI)](#prebuilt-ci).
-- **macOS**: build from source with Homebrew (below). Signed releases are on the [roadmap](ROADMAP.md).
+Download from [**Releases**](https://github.com/thanakorn1999/db-manager/releases/latest):
+
+- **macOS (Apple Silicon)**: `db-manager-macos-arm64.dmg`, drag **DB Manager** to Applications. The app isn't
+  notarized yet, so the first launch is blocked: open **System Settings → Privacy & Security** and click
+  **Open Anyway** (or run `xattr -dr com.apple.quarantine "/Applications/DB Manager.app"`).
+- **Windows (x64)**: `db-manager-windows-x64.zip`, unzip and run `db-manager.exe` (keep the folder together).
+  SmartScreen warns about the unsigned exe: **More info → Run anyway**.
+- Intel Mac / Linux: build from source (below).
 
 Like it? A ⭐ helps other people find it. Ideas and bugs: [open an issue](https://github.com/thanakorn1999/db-manager/issues).
 

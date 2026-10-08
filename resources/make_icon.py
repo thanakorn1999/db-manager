@@ -1,8 +1,9 @@
-# Draws the app icon: resources/icon.png (1024), icon.icns (macOS), icon.ico (Windows).
+# Draws the app icon: resources/icon.png (1024), icon.icns (macOS), icon.ico (Windows), and
+# social-preview.png (1280x640, GitHub Settings -> Social preview; uses macOS's Helvetica Neue).
 # Run from the repo root: python3 resources/make_icon.py  (needs Pillow + numpy; iconutil on macOS)
 import os, shutil, subprocess, sys
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 S = 4  # supersampling; drawn at 4096, scaled down for smooth edges
 N = 1024 * S
@@ -108,6 +109,7 @@ def main():
     out = img.resize((1024, 1024), Image.LANCZOS)
     png = os.path.join(HERE, "icon.png")
     out.save(png)
+    social_preview(out)
 
     out.save(os.path.join(HERE, "icon.ico"), sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
 
@@ -121,6 +123,25 @@ def main():
         shutil.rmtree(iconset)
     else:
         print("iconutil not found (macOS only): icon.icns not updated", file=sys.stderr)
+
+
+def social_preview(icon):
+    w, h = 1280, 640
+    img = gradient((w, h), (30, 27, 75), (8, 78, 99), 0.6).convert("RGBA")
+    img.alpha_composite(icon.resize((400, 400), Image.LANCZOS), (70, 120))
+    d = ImageDraw.Draw(img)
+    font = "/System/Library/Fonts/HelveticaNeue.ttc"
+    def f(size, index):
+        try:
+            return ImageFont.truetype(font, size, index=index)
+        except OSError:
+            return ImageFont.load_default(size)
+    x = 500
+    d.text((x, 190), "DB Manager", font=f(96, 1), fill=(255, 255, 255))
+    d.text((x, 315), "Native PostgreSQL + Redis client", font=f(40, 0), fill=(224, 231, 255))
+    d.text((x, 365), "for macOS and Windows", font=f(40, 0), fill=(224, 231, 255))
+    d.text((x, 450), "C++20  \u00b7  Qt 6  \u00b7  Open source (MIT)", font=f(28, 10), fill=(129, 140, 248))
+    img.convert("RGB").save(os.path.join(HERE, "social-preview.png"))
 
 
 if __name__ == "__main__":

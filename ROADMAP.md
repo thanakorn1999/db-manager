@@ -12,7 +12,7 @@ Want to help? Pick an unchecked item, open an issue to say you're on it, then se
 - Redis: connections, DB selection, SCAN key browser + search, viewers / editors for string, hash, list, set, sorted set, TTL, rename, delete, command editor
 - Export: CSV, Excel (.xlsx), JSON (data + structure), SQL INSERTs; whole database / schema to one .zip or one file per table
 - Backup: `pg_dump`
-- Windows build (vcpkg), GitHub Actions CI
+- Windows build (vcpkg), macOS .dmg, GitHub Actions CI; releases attach both
 - App icon, ER diagram, table icons, Settings (grid colours), passwords in the OS keychain
 
 ## Next — PostgreSQL data
