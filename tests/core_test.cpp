@@ -245,6 +245,20 @@ int main() {
                    "CREATE TABLE dbm_test.b(id int, ax int, ay int, a_id int REFERENCES dbm_test.a, "
                    "FOREIGN KEY (ax, ay) REFERENCES dbm_test.a(x, y))");
         auto si = pg.schemaInfo();
+        // drop helper: b references a, c references b → dropping a pulls in b then c; a view goes first
+        pg.execute("CREATE TABLE dbm_test.c(b_id int); CREATE VIEW dbm_test.v AS SELECT 1");
+        pg.execute("ALTER TABLE dbm_test.b ADD PRIMARY KEY (id); "
+                   "ALTER TABLE dbm_test.c ADD FOREIGN KEY (b_id) REFERENCES dbm_test.b");
+        auto closure = pg.dropClosure({{"dbm_test", "a"}, {"dbm_test", "v"}});
+        assert(closure.size() == 4 && closure[0].name == "a" && closure[0].via.empty() && closure[1].name == "v" &&
+               closure[1].kind == 'v' && closure[2].name == "b" && closure[3].name == "c" && !closure[3].via.empty());
+        auto drops = PostgreSQL::dropStatements(closure, false);
+        assert(drops.size() == 2 && drops[0].sql == R"(DROP VIEW "dbm_test"."v")");
+        bool blocked = false; // a alone: b's FKs block it, all-or-nothing
+        try { pg.executeInTransaction(PostgreSQL::dropStatements({closure[0]}, false)); } catch (const DbError&) { blocked = true; }
+        assert(blocked && pg.dropClosure({{"dbm_test", "a"}}).size() == 3);
+        pg.executeInTransaction(drops);
+        assert(pg.relations("dbm_test").empty());
         pg.execute("DROP SCHEMA dbm_test CASCADE");
         bool foundB = false;
         for (auto& t : si.tables)

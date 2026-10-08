@@ -7,6 +7,7 @@
 #include <QMainWindow>
 #include <map>
 
+class QPersistentModelIndex;
 class QStandardItem;
 class QStandardItemModel;
 class QTabWidget;
@@ -48,6 +49,10 @@ private:
     void exportTables(const QString& conn, const QString& db, const QString& schema);
     std::pair<QString, std::vector<std::pair<std::string, std::string>>>
     pickTables(const std::vector<std::pair<std::string, std::string>>& tables, bool oneSchema);
+    void selectAllTables();
+    void dropTables();
+    void runDrop(const QString& conn, const QString& db, const QPersistentModelIndex& dbIdx,
+                 const std::vector<DropTarget>& targets, bool cascade);
 
     ConnectionConfig configFor(const QString& connId, const QString& db = {});
     Session<PostgreSQL>& pgSession(const QString& connId, const QString& db);

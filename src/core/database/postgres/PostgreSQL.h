@@ -24,6 +24,13 @@ struct Statement {
     bool expectOneRow = false; // fail unless exactly one row is affected
 };
 
+// A relation to drop. via: the foreign key that pulled it in, "" = picked by the user.
+struct DropTarget {
+    std::string schema, name;
+    char kind = 'r'; // pg_class.relkind
+    std::string via;
+};
+
 class PostgreSQL : public Database {
 public:
     explicit PostgreSQL(ConnectionConfig cfg) : cfg_(std::move(cfg)) {}
@@ -58,6 +65,10 @@ public:
     // One relation's structure as a JSON object (columns, primary key, foreign keys, other constraints,
     // indexes, comment), built by PostgreSQL itself. qualifiedName is quoted, e.g. "public"."users".
     std::string tableStructureJson(const std::string& qualifiedName);
+    // rels ({schema, name}) first, then every table referencing them through a foreign key, transitively.
+    std::vector<DropTarget> dropClosure(const std::vector<std::pair<std::string, std::string>>& rels);
+    // One DROP per relation kind, views before tables. cascade: also removes FKs / views outside rels.
+    static std::vector<Statement> dropStatements(const std::vector<DropTarget>& rels, bool cascade);
 
 private:
     struct ConnDeleter { void operator()(PGconn* c) const { PQfinish(c); } };

@@ -25,6 +25,7 @@
 #include <QProcess>
 #include <QStandardPaths>
 #include <QHeaderView>
+#include <QItemSelectionModel>
 #include <QMenu>
 #include <QMessageBox>
 #include <QSplitter>
@@ -66,11 +67,17 @@ MainWindow::MainWindow() {
     tree_ = new QTreeView;
     tree_->setModel(model_);
     tree_->setHeaderHidden(true);
+    tree_->setSelectionMode(QAbstractItemView::ExtendedSelection); // ⇧ / ⌘-click tables to drop several
     // custom menu: right-click must first make the clicked row current (macOS doesn't),
-    // or the actions would hit whatever was selected before
+    // or the actions would hit whatever was selected before; a click inside the selection keeps it
     tree_->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(tree_, &QWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
-        if (auto idx = tree_->indexAt(pos); idx.isValid()) tree_->setCurrentIndex(idx);
+        if (auto idx = tree_->indexAt(pos); idx.isValid()) {
+            if (tree_->selectionModel()->isSelected(idx))
+                tree_->selectionModel()->setCurrentIndex(idx, QItemSelectionModel::NoUpdate);
+            else
+                tree_->setCurrentIndex(idx);
+        }
         QMenu::exec(tree_->actions(), tree_->viewport()->mapToGlobal(pos), nullptr, tree_);
     });
 
@@ -158,7 +165,15 @@ MainWindow::MainWindow() {
         };
         update(model_->invisibleRootItem());
     });
-    tree_->addActions({sql, er, backupAct, exportAct, setIcon, refresh, disconnect, editConn, delConn});
+    auto* selectAll = new QAction("Select All Tables", this);
+    selectAll->setShortcut(QKeySequence::SelectAll);
+    selectAll->setShortcutContext(Qt::WidgetShortcut);
+    connect(selectAll, &QAction::triggered, this, &MainWindow::selectAllTables);
+    auto* dropAct = new QAction("Drop Tables…", this);
+    dropAct->setShortcuts({QKeySequence(Qt::CTRL | Qt::Key_Backspace), QKeySequence::Delete});
+    dropAct->setShortcutContext(Qt::WidgetShortcut);
+    connect(dropAct, &QAction::triggered, this, &MainWindow::dropTables);
+    tree_->addActions({sql, er, backupAct, exportAct, setIcon, selectAll, dropAct, refresh, disconnect, editConn, delConn});
 
     connect(newConn, &QAction::triggered, this, &MainWindow::newConnection);
     connect(editConn, &QAction::triggered, this, &MainWindow::editConnection);
@@ -751,6 +766,126 @@ void MainWindow::exportTable() {
         [this](const QString& msg) {
             statusBar()->clearMessage();
             QMessageBox::warning(this, "Export failed", msg);
+        });
+}
+
+// schema / table item: every table shown in that schema; database item: in its expanded schemas
+void MainWindow::selectAllTables() {
+    auto* item = selectedItem();
+    if (!item && tree_->rootIndex().isValid()) item = model_->itemFromIndex(tree_->rootIndex());
+    if (item && item->data(RoleKind).toInt() == PgRelation) item = item->parent();
+    if (!item || (item->data(RoleKind).toInt() != PgSchema && item->data(RoleKind).toInt() != PgDatabase)) {
+        statusBar()->showMessage("Select a PostgreSQL schema or table first", 3000);
+        return;
+    }
+    tree_->expand(item->index());
+    // rows on screen only: tables of a collapsed schema must not get dropped unseen
+    QItemSelection sel;
+    std::function<void(QStandardItem*)> walk = [&](QStandardItem* it) {
+        if (!tree_->isExpanded(it->index())) return;
+        for (int r = 0; r < it->rowCount(); ++r) {
+            auto* c = it->child(r);
+            if (c->data(RoleKind).toInt() == PgRelation) sel.select(c->index(), c->index());
+            else walk(c);
+        }
+    };
+    walk(item);
+    if (sel.isEmpty()) {
+        statusBar()->showMessage("No tables loaded yet; press ⌘A again", 3000);
+        return;
+    }
+    tree_->selectionModel()->select(sel, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+    statusBar()->showMessage(QString("%1 tables selected · ⌘⌫ drops them").arg(sel.indexes().size()), 3000);
+}
+
+// Selected tables (one database). Tables outside the selection with foreign keys to them are
+// listed first: drop them too, or drop only the selection with CASCADE (removes those FKs).
+void MainWindow::dropTables() {
+    std::vector<std::pair<std::string, std::string>> rels;
+    QString conn, db;
+    QPersistentModelIndex dbIdx;
+    for (auto& idx : tree_->selectionModel()->selectedRows()) {
+        auto* it = model_->itemFromIndex(idx);
+        if (it->data(RoleKind).toInt() != PgRelation) continue;
+        if (rels.empty()) {
+            conn = it->data(RoleConn).toString();
+            db = it->data(RoleDb).toString();
+            dbIdx = it->parent()->parent()->index();
+        } else if (it->data(RoleConn) != conn || it->data(RoleDb) != db) {
+            statusBar()->showMessage("Drop tables of one database at a time", 3000);
+            return;
+        }
+        rels.emplace_back(it->data(RoleSchema).toString().toStdString(), it->data(RoleName).toString().toStdString());
+    }
+    if (rels.empty()) {
+        statusBar()->showMessage("Select tables to drop (⌘A selects all in a schema)", 3000);
+        return;
+    }
+    statusBar()->showMessage("Checking foreign keys…");
+    pgSession(conn, db).run(
+        this, [rels](PostgreSQL& pg) { return pg.dropClosure(rels); },
+        [=, this](const std::vector<DropTarget>& all) {
+            statusBar()->clearMessage();
+            std::vector<DropTarget> picked, extra;
+            for (auto& t : all) (t.via.empty() ? picked : extra).push_back(t);
+            auto list = [](const std::vector<DropTarget>& v) {
+                QStringList l;
+                for (size_t i = 0; i < v.size() && i < 20; ++i)
+                    l << qs(v[i].schema) + "." + qs(v[i].name) + (v[i].via.empty() ? "" : "  ← " + qs(v[i].via));
+                if (v.size() > 20) l << QString("… %1 more").arg(v.size() - 20);
+                return l.join('\n');
+            };
+            QMessageBox box(QMessageBox::Warning, "Drop Tables", {}, QMessageBox::Cancel, this);
+            QAbstractButton *dropAll = nullptr, *cascade = nullptr;
+            if (extra.empty()) {
+                box.setText(QString("Drop %1 table(s)? This can't be undone.").arg(picked.size()));
+                box.setInformativeText(list(picked));
+                dropAll = box.addButton("Drop", QMessageBox::DestructiveRole);
+            } else {
+                box.setText(QString("%1 other table(s) have foreign keys to the selection.").arg(extra.size()));
+                box.setInformativeText(list(extra) + "\n\nDrop them too, or keep them and remove only their "
+                                                    "foreign keys (CASCADE, also drops dependent views)?");
+                dropAll = box.addButton(QString("Drop All %1").arg(all.size()), QMessageBox::DestructiveRole);
+                cascade = box.addButton(QString("Drop %1 + CASCADE").arg(picked.size()), QMessageBox::DestructiveRole);
+            }
+            box.setDefaultButton(QMessageBox::Cancel);
+            box.exec();
+            if (box.clickedButton() == dropAll) runDrop(conn, db, dbIdx, all, false);
+            else if (cascade && box.clickedButton() == cascade) runDrop(conn, db, dbIdx, picked, true);
+        },
+        [this](const QString& msg) {
+            statusBar()->clearMessage();
+            QMessageBox::warning(this, "Drop Tables", msg);
+        });
+}
+
+void MainWindow::runDrop(const QString& conn, const QString& db, const QPersistentModelIndex& dbIdx,
+                         const std::vector<DropTarget>& targets, bool cascade) {
+    statusBar()->showMessage(QString("Dropping %1 table(s)…").arg(targets.size()));
+    pgSession(conn, db).run(
+        this, [stmts = PostgreSQL::dropStatements(targets, cascade)](PostgreSQL& pg) { pg.executeInTransaction(stmts); },
+        [=, this] {
+            statusBar()->showMessage(QString("Dropped %1 table(s)").arg(targets.size()), 5000);
+            if (!dbIdx.isValid()) return;
+            auto* dbItem = model_->itemFromIndex(dbIdx);
+            for (int r = 0; r < dbItem->rowCount(); ++r)
+                if (auto* s = dbItem->child(r); s->data(RoleKind).toInt() == PgSchema) {
+                    resetChildren(s);
+                    if (tree_->isExpanded(s->index())) loadChildren(s);
+                }
+        },
+        [=, this](const QString& msg) {
+            statusBar()->clearMessage();
+            // e.g. a view depends on a table: nothing was dropped (one transaction), offer CASCADE
+            if (cascade) {
+                QMessageBox::warning(this, "Drop failed", msg);
+                return;
+            }
+            QMessageBox box(QMessageBox::Warning, "Drop failed", msg + "\n\nNothing was dropped.", QMessageBox::Cancel, this);
+            auto* retry = box.addButton("Retry with CASCADE", QMessageBox::DestructiveRole);
+            box.setDefaultButton(QMessageBox::Cancel);
+            box.exec();
+            if (box.clickedButton() == retry) runDrop(conn, db, dbIdx, targets, true);
         });
 }
 

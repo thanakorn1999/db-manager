@@ -1,6 +1,7 @@
 #include "PostgreSQL.h"
 
 #include <map>
+#include <string_view>
 
 namespace {
 struct ResultDeleter { void operator()(PGresult* r) const { PQclear(r); } };
@@ -112,6 +113,39 @@ std::vector<std::pair<std::string, char>> PostgreSQL::relations(const std::strin
                       "WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','p','f') ORDER BY 1",
                       {schema});
     for (auto& row : rs.rows) out.emplace_back(*row[0], (*row[1])[0]);
+    return out;
+}
+
+std::vector<DropTarget> PostgreSQL::dropClosure(const std::vector<std::pair<std::string, std::string>>& rels) {
+    std::string names; // quoted, joined with \x1f (unit separator)
+    for (auto& [s, n] : rels) names += (names.empty() ? "" : "\x1f") + quoteIdent(s) + "." + quoteIdent(n);
+    // conparentid = 0: partitions' cloned FKs are covered by their parent's
+    auto rs = execute("WITH RECURSIVE t(oid, via) AS ("
+                      " SELECT unnest(string_to_array($1, chr(31))::regclass[])::oid, ''"
+                      " UNION SELECT c.conrelid, (c.conname || ' → ' || c.confrelid::regclass::text) COLLATE \"default\""
+                      " FROM pg_constraint c JOIN t ON c.confrelid = t.oid"
+                      " WHERE c.contype = 'f' AND c.conparentid = 0 AND c.conrelid <> c.confrelid"
+                      "), d AS (SELECT DISTINCT ON (oid) oid, via FROM t ORDER BY oid, via <> '', via) "
+                      "SELECT n.nspname, r.relname, r.relkind, d.via FROM d JOIN pg_class r ON r.oid = d.oid "
+                      "JOIN pg_namespace n ON n.oid = r.relnamespace ORDER BY d.via <> '', 1, 2",
+                      {names});
+    std::vector<DropTarget> out;
+    for (auto& row : rs.rows) out.push_back({*row[0], *row[1], (*row[2])[0], *row[3]});
+    return out;
+}
+
+std::vector<Statement> PostgreSQL::dropStatements(const std::vector<DropTarget>& rels, bool cascade) {
+    // views first: a view on a dropped table would block its DROP TABLE
+    static const std::pair<const char*, const char*> order[] = {
+        {"v", "VIEW"}, {"m", "MATERIALIZED VIEW"}, {"f", "FOREIGN TABLE"}, {"rp", "TABLE"}};
+    std::vector<Statement> out;
+    for (auto [kinds, what] : order) {
+        std::string names;
+        for (auto& r : rels)
+            if (std::string_view(kinds).find(r.kind) != std::string_view::npos)
+                names += (names.empty() ? "" : ", ") + quoteIdent(r.schema) + "." + quoteIdent(r.name);
+        if (!names.empty()) out.push_back({std::string("DROP ") + what + " " + names + (cascade ? " CASCADE" : "")});
+    }
     return out;
 }
 
