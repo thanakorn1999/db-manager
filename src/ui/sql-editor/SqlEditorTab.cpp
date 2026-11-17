@@ -34,8 +34,19 @@
 #include <QToolBar>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QPointer>
+#include <QPushButton>
+#include <QScrollArea>
+#include <QTableWidget>
+
+#include <memory>
 
 namespace {
+
+// ponytail: matches the English server message; with a localized lc_messages the plain error shows instead
+bool isForeignKeyBlock(const QString& msg) { return msg.contains("violates foreign key constraint"); }
 
 // FK cells get a → in their right corner; clicking it opens the referenced row.
 class ForeignKeyDelegate : public QStyledItemDelegate {
@@ -307,6 +318,22 @@ SqlEditorTab::SqlEditorTab(const ConnectionConfig& cfg, const QString& sql, bool
         });
     templates->setMenu(templateMenu);
     toolbar->addWidget(templates);
+    auto* format = toolbar->addAction("Format");
+    format->setToolTip("Lay the SQL out for reading (⌘⇧F): the selection, or all of it");
+    format->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_F));
+    format->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+    connect(format, &QAction::triggered, this, [this] {
+        auto c = editor_->textCursor();
+        bool selection = c.hasSelection();
+        if (!selection) c.select(QTextCursor::Document);
+        QString in = c.selectedText().replace(QChar::ParagraphSeparator, '\n');
+        QString out = QString::fromStdString(SqlCompleter::format(in.toStdString()));
+        if (out == in) return;
+        int start = c.selectionStart();
+        c.insertText(out); // one undo step
+        c.setPosition(start, selection ? QTextCursor::KeepAnchor : QTextCursor::MoveAnchor); // whole text: back to the top
+        editor_->setTextCursor(c);
+    });
     toolbar->addSeparator();
     addRow_ = toolbar->addAction("+ Row");
     deleteRows_ = toolbar->addAction("− Row");
@@ -728,10 +755,119 @@ void SqlEditorTab::save() {
             setRunning(false);
             execute(lastSql_, QString("Saved %1 change(s)").arg(n)); // reload: defaults, triggers, ids
         },
-        [this](const QString& msg) {
+        [this, deleted](const QString& msg) {
             setRunning(false);
-            showError("Save failed, nothing was written: " + msg);
+            if (deleted.empty() || !isForeignKeyBlock(msg)) {
+                showError("Save failed, nothing was written: " + msg);
+                return;
+            }
+            RowKeys rows{target_.schema, target_.table, {}, {deleted.begin(), deleted.end()}};
+            for (int k : target_.keyColumns) rows.columns.push_back(target_.columns[k]);
+            resolveReferences(rows, "Save failed, nothing was written: " + msg, [this] { save(); });
         });
+}
+
+void SqlEditorTab::resolveReferences(const RowKeys& rows, const QString& error, std::function<void()> done) {
+    status_->setText("Looking up the rows that block the delete…");
+    session_.run(
+        this, [rows](PostgreSQL& pg) { return pg.referencingRows(rows); },
+        [=, this](const std::vector<Referencing>& first) {
+            if (first.empty()) { // blocked by something else (e.g. a trigger): just say why
+                showError(error);
+                return;
+            }
+            status_->clear();
+            auto* dlg = new QDialog(this);
+            dlg->setAttribute(Qt::WA_DeleteOnClose);
+            dlg->setWindowModality(Qt::WindowModal);
+            dlg->setWindowTitle("Delete blocked by foreign keys");
+            dlg->resize(800, 500);
+            auto* intro = new QLabel(QString("%1 row(s) of %2 can't be deleted while these rows reference them. Delete "
+                                             "them one by one; the save runs again once none are left.")
+                                         .arg(rows.keys.size())
+                                         .arg(QString::fromStdString(rows.schema + "." + rows.table)));
+            intro->setWordWrap(true);
+            auto* scroll = new QScrollArea;
+            scroll->setWidgetResizable(true);
+            auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel);
+            connect(buttons, &QDialogButtonBox::rejected, dlg, &QDialog::reject);
+            auto* layout = new QVBoxLayout(dlg);
+            layout->addWidget(intro);
+            layout->addWidget(scroll, 1);
+            layout->addWidget(buttons);
+
+            QPointer<QDialog> guard(dlg);
+            // fills the dialog; when its last row is deleted, looks again (more than the shown limit, new rows)
+            auto fill = std::make_shared<std::function<void(const std::vector<Referencing>&)>>();
+            connect(dlg, &QObject::destroyed, [fill] { *fill = nullptr; }); // breaks the self-reference
+            *fill = [=, this](const std::vector<Referencing>& refs) {
+                auto* content = new QWidget;
+                auto* col = new QVBoxLayout(content);
+                auto left = std::make_shared<int>(0);
+                for (auto& ref : refs) {
+                    *left += int(ref.rows.rows.size());
+                    auto* title = new QLabel(QString("<b>%1</b> · %2 row(s)%3 · via %4")
+                                                 .arg(QString::fromStdString(ref.keys.schema + "." + ref.keys.table).toHtmlEscaped())
+                                                 .arg(ref.rows.rows.size())
+                                                 .arg(ref.rows.rows.size() >= 200 ? " shown, more after these" : "")
+                                                 .arg(QString::fromStdString(ref.constraint).toHtmlEscaped()));
+                    auto* grid = new QTableWidget(int(ref.rows.rows.size()), int(ref.rows.columns.size()) + 1);
+                    QStringList headers{""};
+                    for (auto& c : ref.rows.columns) headers << QString::fromStdString(c);
+                    grid->setHorizontalHeaderLabels(headers);
+                    grid->setEditTriggers(QAbstractItemView::NoEditTriggers);
+                    grid->verticalHeader()->hide();
+                    grid->setMinimumHeight(std::min(8, int(ref.rows.rows.size()) + 1) * 30 + 10);
+                    for (size_t r = 0; r < ref.rows.rows.size(); ++r) {
+                        for (size_t c = 0; c < ref.rows.columns.size(); ++c) {
+                            auto& v = ref.rows.rows[r][c];
+                            auto* item = new QTableWidgetItem(v ? QString::fromStdString(*v) : "NULL");
+                            if (!v) item->setForeground(palette().placeholderText());
+                            grid->setItem(int(r), int(c) + 1, item);
+                        }
+                        auto* del = new QPushButton("Delete");
+                        grid->setCellWidget(int(r), 0, del);
+                        RowKeys one{ref.keys.schema, ref.keys.table, ref.keys.columns, {ref.keys.keys[r]}};
+                        connect(del, &QPushButton::clicked, del, [=, this] {
+                            del->setEnabled(false);
+                            QPointer<QPushButton> button(del);
+                            session_.run(
+                                this, [st = PostgreSQL::deleteRow(one, 0)](PostgreSQL& pg) { pg.executeInTransaction({st}); },
+                                [=, this] {
+                                    if (!guard || !button) return;
+                                    grid->hideRow(int(r));
+                                    if (--*left > 0) return;
+                                    session_.run(
+                                        this, [rows](PostgreSQL& pg) { return pg.referencingRows(rows); },
+                                        [=](const std::vector<Referencing>& more) {
+                                            if (!guard) return;
+                                            if (!more.empty()) return (*fill)(more);
+                                            dlg->accept();
+                                            done();
+                                        },
+                                        [=](const QString& msg) { if (guard) QMessageBox::warning(dlg, "Lookup failed", msg); });
+                                },
+                                [=, this](const QString& msg) {
+                                    if (!guard || !button) return;
+                                    button->setEnabled(true);
+                                    if (isForeignKeyBlock(msg)) // its own children first, then this row again
+                                        resolveReferences(one, msg, [button] { if (button) button->click(); });
+                                    else
+                                        QMessageBox::warning(dlg, "Delete failed", msg);
+                                });
+                        });
+                    }
+                    grid->resizeColumnsToContents();
+                    col->addWidget(title);
+                    col->addWidget(grid);
+                }
+                col->addStretch();
+                scroll->setWidget(content); // deletes the previous content
+            };
+            (*fill)(first);
+            dlg->show();
+        },
+        [=, this](const QString& msg) { showError(error + "\n" + msg); });
 }
 
 void SqlEditorTab::loadSchema() {

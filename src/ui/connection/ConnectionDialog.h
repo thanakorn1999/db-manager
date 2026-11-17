@@ -22,6 +22,7 @@ public:
 private:
     void typeChanged();
     void test();
+    void createDatabase();
 
     std::string id_;
     QFormLayout* form_;
@@ -35,6 +36,7 @@ private:
     QComboBox* sslMode_;
     QCheckBox* tls_;
     QPushButton* testButton_;
+    QPushButton* createButton_;
     QLabel* testResult_;
 
     std::unique_ptr<Session<PostgreSQL>> pgTest_;

@@ -40,6 +40,9 @@ private:
     void fillFilterColumns();
     void execute(const QString& sql, const QString& note = {});
     void save();
+    // A delete of `rows` failed with `error` (FK violation): lists the rows referencing them, each with a Delete
+    // button (a blocked one opens this again for its own children); done() once none are left.
+    void resolveReferences(const RowKeys& rows, const QString& error, std::function<void()> done);
     // quoted schema.table for INSERTs, "table_name" when the result isn't one table
     std::string insertTable() const;
     void setRunning(bool running);

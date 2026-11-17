@@ -30,6 +30,7 @@ browse and edit data, follow foreign keys, export, and look after Redis keys, al
 
 - **SQL editor that knows your schema**: suggestions follow the clause you're in; after `JOIN`, tables
   linked by a foreign key come first with the whole `ON` condition filled in. Unknown tables / columns get a yellow underline.
+- **One-click SQL formatting** (⌘⇧F): clauses on their own lines, one column per line, subqueries indented.
 - **Edit data in the grid**: change cells, add / delete rows (JOIN results too), ⌘Z undo, save in one transaction.
 - **Filter and sort without losing the SQL**: ⌘F and header clicks write `WHERE` / `ORDER BY` into your query, so you always see what ran.
 - **Follow foreign keys**: click the → in an FK cell to open the parent row; the PK / FK ⋮ menu writes the `JOIN` for you.
@@ -63,6 +64,8 @@ cmake -S . -B build -DCMAKE_PREFIX_PATH="$(brew --prefix qt);$(brew --prefix qtk
 cmake --build build -j
 open build/db-manager.app
 ```
+
+Build, install and open `/Applications/DB Manager.app` in one step (Release build, tests, bundled libs, replaces the old copy): double-click `deploy.command`, or run `./deploy.command`
 
 ## Build (Windows)
 
@@ -133,6 +136,7 @@ The Redis live test uses DB 15 and runs `FLUSHDB` on it.
 | ⌘1…⌘8, ⌘9 | Go to tab N, last tab |
 | ⌘↵ | Run SQL (selection only if text is selected) |
 | ⌘. | Cancel running query |
+| ⌘⇧F | Format SQL: clauses on their own lines, keywords upper case (the selection, or the whole editor) |
 | ⌘, | Settings (result grid colours) |
 | ⌃Space | SQL: show suggestions (they also pop up while typing; Tab / ↵ accepts, Esc closes) |
 | ⌘C | Copy selected cells (tab-separated); right-click → Copy as JSON / CSV / Markdown / SQL INSERT |

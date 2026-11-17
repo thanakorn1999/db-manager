@@ -54,8 +54,13 @@ ConnectionDialog::ConnectionDialog(const ConnectionConfig& cfg, QWidget* parent)
     testResult_ = new QLabel;
     testResult_->setWordWrap(true);
     testResult_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    createButton_ = new QPushButton("Create Database");
+    createButton_->hide(); // shown when Test says the database doesn't exist
+    auto* testButtons = new QVBoxLayout;
+    testButtons->addWidget(testButton_);
+    testButtons->addWidget(createButton_);
     auto* testRow = new QHBoxLayout;
-    testRow->addWidget(testButton_);
+    testRow->addLayout(testButtons);
     testRow->addWidget(testResult_, 1);
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel);
@@ -66,6 +71,7 @@ ConnectionDialog::ConnectionDialog(const ConnectionConfig& cfg, QWidget* parent)
 
     connect(type_, &QComboBox::currentIndexChanged, this, &ConnectionDialog::typeChanged);
     connect(testButton_, &QPushButton::clicked, this, &ConnectionDialog::test);
+    connect(createButton_, &QPushButton::clicked, this, &ConnectionDialog::createDatabase);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     connect(buttons, &QDialogButtonBox::accepted, this, [this] {
         if (host_->text().trimmed().isEmpty()) {
@@ -105,6 +111,7 @@ ConnectionConfig ConnectionDialog::config() const {
 
 void ConnectionDialog::test() {
     testButton_->setEnabled(false);
+    createButton_->hide();
     testResult_->setText("Connecting…");
     auto ok = [this] {
         testButton_->setEnabled(true);
@@ -113,6 +120,10 @@ void ConnectionDialog::test() {
     auto fail = [this](const QString& msg) {
         testButton_->setEnabled(true);
         testResult_->setText("<font color=red>" + msg.toHtmlEscaped() + "</font>");
+        // ponytail: matches the English server message; a localized server (lc_messages) won't offer the button
+        createButton_->setVisible(type_->currentData().toInt() == int(DbType::PostgreSQL) &&
+                                  !database_->text().trimmed().isEmpty() && msg.contains("does not exist") &&
+                                  msg.contains("database"));
     };
     auto cfg = config();
     if (cfg.type == DbType::Redis) {
@@ -122,4 +133,26 @@ void ConnectionDialog::test() {
         pgTest_ = std::make_unique<Session<PostgreSQL>>(cfg);
         pgTest_->run(this, [](PostgreSQL& p) { p.ping(); }, ok, fail);
     }
+}
+
+// Logs in to template1 (like createdb; "postgres" may not exist) with the same credentials, creates the
+// database the form names, then re-tests, which also closes the template1 session.
+void ConnectionDialog::createDatabase() {
+    auto cfg = config();
+    std::string stmt = "CREATE DATABASE " + PostgreSQL::quoteIdent(cfg.database);
+    cfg.database = "template1";
+    createButton_->setEnabled(false);
+    testResult_->setText("Creating database…");
+    pgTest_ = std::make_unique<Session<PostgreSQL>>(cfg);
+    pgTest_->run(
+        this, [stmt](PostgreSQL& p) { p.execute(stmt); },
+        [this] {
+            createButton_->setEnabled(true);
+            test();
+        },
+        [this](const QString& msg) {
+            pgTest_.reset(); // don't hold template1 open
+            createButton_->setEnabled(true);
+            testResult_->setText("<font color=red>" + msg.toHtmlEscaped() + "</font>");
+        });
 }

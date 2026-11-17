@@ -31,6 +31,20 @@ struct DropTarget {
     std::string via;
 };
 
+// Some rows of one table, each identified by the values of columns.
+struct RowKeys {
+    std::string schema, table;
+    std::vector<std::string> columns; // the primary key, or {"ctid"} for a table without one
+    std::vector<Params> keys;         // one per row, values in columns order
+};
+
+// Rows of one table that keep other rows from being deleted, through one foreign key.
+struct Referencing {
+    std::string constraint;
+    RowKeys keys;   // keys.keys[i] identifies rows.rows[i]
+    ResultSet rows; // SELECT * of them ("ctid" first without a primary key)
+};
+
 class PostgreSQL : public Database {
 public:
     explicit PostgreSQL(ConnectionConfig cfg) : cfg_(std::move(cfg)) {}
@@ -71,6 +85,11 @@ public:
     std::vector<DropTarget> dropClosure(const std::vector<std::pair<std::string, std::string>>& rels);
     // One DROP per relation kind, views before tables. cascade: also removes FKs / views outside rels.
     static std::vector<Statement> dropStatements(const std::vector<DropTarget>& rels, bool cascade);
+    // Rows of other tables (or the same one) referencing the given rows through a foreign key that blocks deleting
+    // them (ON DELETE NO ACTION / RESTRICT), one entry per such key with any; at most `limit` rows each.
+    std::vector<Referencing> referencingRows(const RowKeys& of, int limit = 200);
+    // DELETE of row i of t, expecting exactly one row.
+    static Statement deleteRow(const RowKeys& t, size_t i);
 
 private:
     struct ConnDeleter { void operator()(PGconn* c) const { PQfinish(c); } };

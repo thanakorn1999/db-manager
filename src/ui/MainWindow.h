@@ -70,6 +70,7 @@ private:
                  const std::vector<DropTarget>& targets, bool cascade);
     // force: WITH (FORCE), disconnecting other sessions on it (PostgreSQL 13+)
     void dropDatabase(const QString& conn, const QString& db, bool force);
+    void createDatabase(); // dialog: name, owner, encoding, template; runs on the selected connection
 
     ConnectionConfig configFor(const QString& connId, const QString& db = {});
     Session<PostgreSQL>& pgSession(const QString& connId, const QString& db);
@@ -82,6 +83,7 @@ private:
     QToolButton* dbBack_;
     QComboBox* dbPick_;
     QAction* dropDb_; // shown in the right-click menu on a database only
+    QAction* newDb_;  // shown on a PostgreSQL connection / database
     QTabWidget* tabs_;
     int loadSeq_ = 0;
     std::map<QString, ConnectionConfig> configs_;

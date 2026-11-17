@@ -56,4 +56,9 @@ std::string sortBy(const std::string& sql, const SchemaInfo& schema, const std::
                    const std::string& table, const std::vector<std::string>& columns, size_t column,
                    const std::string& dir);
 
+// sql laid out for reading: clauses on their own lines, a multi-column SELECT / SET / VALUES one item per
+// line, AND / OR on new lines in WHERE / HAVING / ON, subqueries indented, keywords upper case. Spacing
+// inside expressions, string literals and comments are kept. Text with $$-quoted bodies comes back unchanged.
+std::string format(const std::string& sql);
+
 }

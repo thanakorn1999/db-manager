@@ -736,4 +736,157 @@ std::vector<std::pair<size_t, size_t>> unknownNames(const std::string& sql, cons
     return out;
 }
 
+std::string format(const std::string& sql) {
+    // ponytail: $$-quoted bodies (functions, DO blocks) would be re-indented as SQL; leave such text alone
+    for (size_t i = sql.find('$'); i != std::string::npos; i = sql.find('$', i + 1)) {
+        size_t j = i + 1;
+        while (j < sql.size() && (std::isalpha(static_cast<unsigned char>(sql[j])) || sql[j] == '_')) ++j;
+        if (j < sql.size() && sql[j] == '$') return sql;
+    }
+    static const std::set<std::string> upperWords = {
+        "ALL", "AND", "ANY", "AS", "ASC", "BETWEEN", "BY", "CASE", "CAST", "CONFLICT", "CREATE", "CROSS", "DEFAULT",
+        "DELETE", "DESC", "DISTINCT", "DO", "DROP", "ELSE", "END", "EXCEPT", "EXISTS", "FALSE", "FETCH", "FILTER",
+        "FOR", "FROM", "FULL", "GROUP", "HAVING", "ILIKE", "IN", "INNER", "INSERT", "INTERSECT", "INTO", "IS", "JOIN",
+        "LATERAL", "LEFT", "LIKE", "LIMIT", "NATURAL", "NOT", "NOTHING", "NULL", "NULLS", "OFFSET", "ON", "OR",
+        "ORDER", "OUTER", "OVER", "PARTITION", "RECURSIVE", "RETURNING", "RIGHT", "SELECT", "SET", "SIMILAR",
+        "TABLE", "THEN", "TRUE", "UNION", "UPDATE", "USING", "VALUES", "WHEN", "WHERE", "WINDOW", "WITH", "ALTER",
+        "VIEW", "INDEX", "PRIMARY", "FOREIGN", "REFERENCES", "CONSTRAINT", "UNIQUE", "CHECK", "TRUNCATE", "BEGIN", "COMMIT", "ROLLBACK", "KEY"};
+    auto toks = tokenize(sql);
+    // query frames (a statement, a subquery) break into clause lines; plain ( ) stays on one line
+    struct Frame {
+        bool query;
+        int base = 0, openIndent = 0;
+        bool dml = false;       // a SELECT / INSERT / UPDATE / DELETE has started: clauses break
+        std::string clause;     // SELECT, FROM, WHERE, SET, VALUES, JOIN, ON, ...
+        bool listBreak = false; // one item per line after top-level commas
+        bool head = false;      // SELECT list goes on the next line, after DISTINCT [ON (...)]
+        bool between = false;   // the next AND belongs to BETWEEN
+    };
+    std::vector<Frame> st{{true}};
+    std::string out;
+    bool lineStart = true, forceSpace = false, noSpace = false, blank = false;
+    int indent = 0;
+    auto newline = [&](int level) {
+        while (!out.empty() && out.back() == ' ') out.pop_back();
+        if (!lineStart && !out.empty()) out += '\n';
+        lineStart = true;
+        indent = level;
+    };
+    // a SELECT with a comma at its own level lists one item per line
+    auto multiSelect = [&](size_t i) {
+        int depth = 0;
+        for (size_t j = i + 1; j < toks.size(); ++j) {
+            auto& t = toks[j];
+            if (t.punct('(')) ++depth;
+            else if (t.punct(')') && depth-- == 0) return false;
+            else if (depth == 0 && t.punct(',')) return true;
+            else if (depth == 0 && (t.punct(';') || t.is("FROM") || t.is("INTO") || t.is("WHERE") || t.is("UNION") ||
+                                    t.is("INTERSECT") || t.is("EXCEPT") || t.is("GROUP") || t.is("ORDER") || t.is("LIMIT")))
+                return false;
+        }
+        return false;
+    };
+    auto any = [](const Token* t, std::initializer_list<const char*> kws) {
+        for (auto* k : kws)
+            if (t && t->is(k)) return true;
+        return false;
+    };
+
+    for (size_t i = 0; i < toks.size(); ++i) {
+        auto& t = toks[i];
+        const Token* prev = i ? &toks[i - 1] : nullptr;
+        const Token* next = i + 1 < toks.size() ? &toks[i + 1] : nullptr;
+        bool space = forceSpace || (prev && t.pos > prev->end);
+        if (noSpace) space = false;
+        forceSpace = noSpace = false;
+        std::string text = sql.substr(t.pos, t.end - t.pos);
+        if (t.kind == Token::Word && upperWords.count(t.upper) && !(prev && prev->punct('.')) && !(next && next->punct('.')))
+            text = t.upper;
+        if (blank) { // after ; : a blank line between statements
+            newline(0);
+            out += '\n';
+            blank = false;
+        }
+
+        auto& f = st.back();
+        if (f.query && t.kind == Token::Word) {
+            if (f.head && !any(&t, {"DISTINCT", "ALL", "ON"})) {
+                newline(f.base + 1);
+                f.head = false;
+            }
+            const char* clause = nullptr;
+            bool join = any(&t, {"LEFT", "RIGHT", "FULL", "INNER", "CROSS", "NATURAL"}) && next &&
+                        any(next, {"JOIN", "OUTER"});
+            if (any(&t, {"SELECT", "WITH", "INSERT", "VALUES"}) && !any(prev, {"DEFAULT"})) clause = t.is("WITH") ? "WITH" : t.upper.c_str();
+            else if (any(&t, {"UPDATE", "DELETE"}) && !any(prev, {"DO", "FOR", "ON"})) clause = t.upper.c_str();
+            if (clause) f.dml = true;
+            if (f.dml && !clause) {
+                if (t.is("FROM") && !any(prev, {"DELETE", "DISTINCT"})) clause = "FROM";
+                else if (any(&t, {"WHERE", "HAVING", "LIMIT", "OFFSET", "FETCH", "WINDOW", "RETURNING"})) clause = t.upper.c_str();
+                else if (any(&t, {"GROUP", "ORDER"}) && next && next->is("BY")) clause = t.upper.c_str();
+                else if (t.is("SET")) clause = "SET";
+                else if (any(&t, {"UNION", "INTERSECT", "EXCEPT"})) clause = "UNION";
+                else if (join || (t.is("JOIN") && !any(prev, {"LEFT", "RIGHT", "FULL", "INNER", "CROSS", "NATURAL", "OUTER"})))
+                    clause = "JOIN";
+                else if (t.is("ON") && next && next->is("CONFLICT")) clause = "CONFLICT";
+            }
+            if (clause) {
+                newline(f.base);
+                f.clause = clause;
+                f.listBreak = f.clause == "SET" || f.clause == "VALUES" || (f.clause == "SELECT" && multiSelect(i));
+                f.head = f.clause == "SELECT" && f.listBreak;
+                f.between = false;
+            } else if (f.dml && t.is("ON") && f.clause == "JOIN") {
+                f.clause = "ON";
+            } else if (f.dml && t.is("BETWEEN")) {
+                f.between = true;
+            } else if (f.dml && any(&t, {"AND", "OR"}) && (f.clause == "WHERE" || f.clause == "HAVING" || f.clause == "ON")) {
+                if (f.between && t.is("AND")) f.between = false;
+                else newline(f.base + 1);
+            }
+        }
+
+        if (t.punct(')') && st.size() > 1) {
+            Frame closed = st.back();
+            st.pop_back();
+            if (closed.query) newline(closed.openIndent);
+            space = false;
+        }
+        if (t.punct(',') || t.punct(';') || t.punct(')')) space = false;
+        // a lone = gets spaces (a=b); <=, =>, :: and friends are left as typed
+        bool equals = t.punct('=') && !(prev && prev->kind == Token::Punct) && !(next && next->kind == Token::Punct);
+        if (equals) space = true;
+
+        if (lineStart) {
+            out += std::string(size_t(indent) * 2, ' ');
+            lineStart = false;
+        } else if (space && !out.empty()) {
+            out += ' ';
+        }
+        out += text;
+
+        auto& g = st.back();
+        if (equals) forceSpace = true;
+        if (t.punct('(')) {
+            bool sub = next && any(next, {"SELECT", "WITH", "VALUES"});
+            Frame child{sub};
+            child.openIndent = indent;
+            child.base = sub ? indent + 1 : g.base;
+            st.push_back(child);
+            noSpace = true;
+            if (sub) newline(child.base);
+        } else if (t.punct(',')) {
+            if (g.query && g.listBreak) newline(g.base + 1);
+            else forceSpace = true;
+        } else if (t.punct(';') && st.size() == 1) {
+            st = {{true}};
+            blank = true;
+        } else if (t.kind == Token::Comment && t.text.rfind("--", 0) == 0) {
+            newline(indent);
+        }
+    }
+    while (!out.empty() && (out.back() == ' ' || out.back() == '\n')) out.pop_back();
+    return out;
+}
+
 }

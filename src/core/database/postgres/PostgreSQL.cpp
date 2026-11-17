@@ -1,5 +1,7 @@
 #include "PostgreSQL.h"
 
+#include <algorithm>
+
 #include <map>
 #include <string_view>
 
@@ -132,6 +134,86 @@ std::vector<DropTarget> PostgreSQL::dropClosure(const std::vector<std::pair<std:
     std::vector<DropTarget> out;
     for (auto& row : rs.rows) out.push_back({*row[0], *row[1], (*row[2])[0], *row[3]});
     return out;
+}
+
+std::vector<Referencing> PostgreSQL::referencingRows(const RowKeys& of, int limit) {
+    std::vector<Referencing> out;
+    if (of.keys.empty()) return out;
+    auto split = [](const std::string& s) { // chr(31)-joined
+        std::vector<std::string> v;
+        for (size_t p = 0;;) {
+            auto e = s.find('\x1f', p);
+            v.push_back(s.substr(p, e - p));
+            if (e == std::string::npos) return v;
+            p = e + 1;
+        }
+    };
+    auto list = [](const std::vector<std::string>& cols) {
+        std::string s;
+        for (auto& c : cols) s += (s.empty() ? "" : ", ") + quoteIdent(c);
+        return s;
+    };
+    auto names = [](const char* rel, const char* nums) {
+        return std::string("(SELECT string_agg(a.attname::text, chr(31) ORDER BY k.i) FROM unnest(") + nums +
+               "::int2[]) WITH ORDINALITY k(n, i) JOIN pg_attribute a ON a.attrelid = " + rel + " AND a.attnum = k.n)";
+    };
+    std::string parent = quoteIdent(of.schema) + "." + quoteIdent(of.table);
+    // conparentid = 0: partitions' cloned FKs are covered by their parent's
+    auto fks = execute("SELECT c.conname, n.nspname, r.relname, " + names("c.conrelid", "c.conkey") + ", " +
+                           names("c.confrelid", "c.confkey") + ", (SELECT " + names("x.indrelid", "x.indkey") +
+                           " FROM pg_index x WHERE x.indrelid = c.conrelid AND x.indisprimary) "
+                           "FROM pg_constraint c JOIN pg_class r ON r.oid = c.conrelid "
+                           "JOIN pg_namespace n ON n.oid = r.relnamespace "
+                           "WHERE c.contype = 'f' AND c.conparentid = 0 AND c.confdeltype IN ('a', 'r') "
+                           "AND c.confrelid = $1::regclass ORDER BY 2, 3, 1",
+                       {parent});
+
+    // the rows being deleted: (k1 = $1 AND k2 = $2) OR (...)
+    Params params;
+    std::string match;
+    for (auto& key : of.keys) {
+        std::string one;
+        for (size_t i = 0; i < of.columns.size(); ++i) {
+            params.push_back(key[i]);
+            one += (one.empty() ? "" : " AND ") + quoteIdent(of.columns[i]) + " = $" + std::to_string(params.size());
+        }
+        match += (match.empty() ? "(" : " OR (") + one + ")";
+    }
+    for (auto& fk : fks.rows) {
+        Referencing ref;
+        ref.constraint = *fk[0];
+        ref.keys.schema = *fk[1];
+        ref.keys.table = *fk[2];
+        ref.keys.columns = fk[5] ? split(*fk[5]) : std::vector<std::string>{"ctid"};
+        ref.rows = execute(std::string("SELECT ") + (fk[5] ? "*" : "ctid, *") + " FROM " + quoteIdent(ref.keys.schema) +
+                               "." + quoteIdent(ref.keys.table) + " WHERE (" + list(split(*fk[3])) + ") IN (SELECT " +
+                               list(split(*fk[4])) + " FROM " + parent + " WHERE " + match + ") LIMIT " +
+                               std::to_string(limit),
+                           params);
+        if (ref.rows.rows.empty()) continue;
+        std::vector<size_t> at;
+        for (auto& c : ref.keys.columns)
+            at.push_back(std::find(ref.rows.columns.begin(), ref.rows.columns.end(), c) - ref.rows.columns.begin());
+        for (auto& row : ref.rows.rows) {
+            Params key;
+            for (size_t i : at) key.push_back(row[i]);
+            ref.keys.keys.push_back(std::move(key));
+        }
+        out.push_back(std::move(ref));
+    }
+    return out;
+}
+
+Statement PostgreSQL::deleteRow(const RowKeys& t, size_t i) {
+    Statement st;
+    st.expectOneRow = true;
+    std::string where;
+    for (size_t c = 0; c < t.columns.size(); ++c) {
+        st.params.push_back(t.keys[i][c]);
+        where += (where.empty() ? "" : " AND ") + quoteIdent(t.columns[c]) + " = $" + std::to_string(st.params.size());
+    }
+    st.sql = "DELETE FROM " + quoteIdent(t.schema) + "." + quoteIdent(t.table) + " WHERE " + where;
+    return st;
 }
 
 std::vector<Statement> PostgreSQL::dropStatements(const std::vector<DropTarget>& rels, bool cascade) {

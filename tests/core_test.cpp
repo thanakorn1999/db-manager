@@ -154,6 +154,31 @@ static void completerTests() {
     assert(unknown("WITH t AS (SELECT 1) SELECT * FROM t, generate_series(1, 2), pg_class") == W{});
     assert(unknown("SELECT * FROM users WHERE id IN (SELECT user_id FROM orders WHERE total > 0)") == W{});
     assert(SqlCompleter::unknownNames("SELECT * FROM nope", SchemaInfo{}).empty()); // schema not loaded
+    // format: clause lines, one SELECT item per line, AND / OR broken, subqueries indented
+    assert(SqlCompleter::format("select a, b from t where x=1 and y between 1 and 2 order by a") ==
+           "SELECT\n  a,\n  b\nFROM t\nWHERE x = 1\n  AND y BETWEEN 1 AND 2\nORDER BY a");
+    assert(SqlCompleter::format("select * from t where id in (select id from u);select 1") ==
+           "SELECT *\nFROM t\nWHERE id IN (\n  SELECT id\n  FROM u\n);\n\nSELECT 1");
+    assert(SqlCompleter::format("update t set a=1, b='x' where id = 2") == "UPDATE t\nSET a = 1,\n  b = 'x'\nWHERE id = 2");
+    assert(SqlCompleter::format("do $$ begin end $$") == "do $$ begin end $$"); // bodies left alone
+    for (std::string q : {"select o.id, sum(x) over (partition by a order by b) from orders o left outer join c on c.id=o.c "
+                          "-- note\nwhere o.s in ('a,b', 'select') and o.t is distinct from 1 group by 1 having count(*)>=2",
+                          "insert into t (a) values (1), (2) on conflict (a) do update set a = excluded.a returning *",
+                          "with x as (select 1) select * from x union all select 2; delete from t where a::int = 1"}) {
+        auto f = SqlCompleter::format(q);
+        assert(SqlCompleter::format(f) == f); // stable on a second click
+        std::string a, b; // same tokens, so the same meaning
+        auto squash = [](const std::string& s, std::string& out) {
+            bool str = false;
+            for (char c : s) {
+                if (c == '\'') str = !str;
+                if (!str && std::isspace(static_cast<unsigned char>(c))) continue;
+                out += str ? c : char(std::toupper(static_cast<unsigned char>(c)));
+            }
+        };
+        squash(q, a), squash(f, b);
+        assert(a == b);
+    }
     std::puts("completer ok");
 }
 
@@ -368,6 +393,27 @@ int main() {
         auto src = pg.sources(pg.execute("SELECT f.id, e.name AS nm, 1 FROM dbm_f f JOIN dbm_e e ON e.id = f.e_id"));
         assert(src[0].table == "dbm_f" && src[0].column == "id" && src[1].table == "dbm_e" && src[1].column == "name" &&
                src[2].table.empty());
+
+        // rows blocking a delete: FK child with a PK, grandchild without one (ctid); CASCADE children don't block
+        pg.execute("CREATE TEMP TABLE dbm_rp(id text PRIMARY KEY); INSERT INTO dbm_rp VALUES ('a'), ('b');"
+                   "CREATE TEMP TABLE dbm_rc(id int PRIMARY KEY, p text REFERENCES dbm_rp); "
+                   "INSERT INTO dbm_rc VALUES (1, 'a'), (2, 'a'), (3, 'b');"
+                   "CREATE TEMP TABLE dbm_rg(c int REFERENCES dbm_rc); INSERT INTO dbm_rg VALUES (1);"
+                   "CREATE TEMP TABLE dbm_rk(p text REFERENCES dbm_rp ON DELETE CASCADE); INSERT INTO dbm_rk VALUES ('a')");
+        std::string tmp = *pg.execute("SELECT nspname FROM pg_namespace WHERE oid = pg_my_temp_schema()").rows[0][0];
+        auto blockers = pg.referencingRows({tmp, "dbm_rp", {"id"}, {{"a"}}});
+        assert(blockers.size() == 1 && blockers[0].keys.table == "dbm_rc" && blockers[0].keys.columns == V{"id"} &&
+               blockers[0].keys.keys == (std::vector<Params>{{"1"}, {"2"}}));
+        auto grand = pg.referencingRows(blockers[0].keys);
+        assert(grand.size() == 1 && grand[0].keys.columns == V{"ctid"} && grand[0].rows.columns[0] == "ctid" &&
+               grand[0].keys.keys.size() == 1);
+        err = false; // row 1 still has a grandchild
+        try { pg.executeInTransaction({PostgreSQL::deleteRow(blockers[0].keys, 0)}); } catch (const DbError&) { err = true; }
+        assert(err);
+        pg.executeInTransaction({PostgreSQL::deleteRow(grand[0].keys, 0)}); // by ctid
+        pg.executeInTransaction({PostgreSQL::deleteRow(blockers[0].keys, 0), PostgreSQL::deleteRow(blockers[0].keys, 1)});
+        assert(pg.referencingRows({tmp, "dbm_rp", {"id"}, {{"a"}}}).empty());
+        pg.execute("DELETE FROM dbm_rp WHERE id = 'a'");
 
         // catalog for completion: columns in order, single + composite FKs
         pg.execute("DROP SCHEMA IF EXISTS dbm_test CASCADE; CREATE SCHEMA dbm_test; "

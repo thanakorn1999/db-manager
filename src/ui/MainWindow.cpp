@@ -26,6 +26,7 @@
 #include <QTableWidget>
 #include <QRadioButton>
 #include <QLabel>
+#include <QLineEdit>
 #include <QFileInfo>
 #include <QProcess>
 #include <QStandardPaths>
@@ -85,6 +86,8 @@ MainWindow::MainWindow() {
         }
         auto* item = selectedItem();
         dropDb_->setVisible(item && item->data(RoleKind).toInt() == PgDatabase);
+        newDb_->setVisible(item && configs_.at(item->data(RoleConn).toString()).type == DbType::PostgreSQL &&
+                           (item->data(RoleKind).toInt() == Connection || item->data(RoleKind).toInt() == PgDatabase));
         QMenu::exec(tree_->actions(), tree_->viewport()->mapToGlobal(pos), nullptr, tree_);
     });
 
@@ -186,10 +189,12 @@ MainWindow::MainWindow() {
         if (auto* item = selectedItem(); item && item->data(RoleKind).toInt() == PgDatabase)
             dropDatabase(item->data(RoleConn).toString(), item->data(RoleDb).toString(), false);
     });
+    newDb_ = new QAction("New Database…", this);
+    connect(newDb_, &QAction::triggered, this, &MainWindow::createDatabase);
     delConn->setText("Delete Connection"); // the menu runs on any row; say what it deletes
     delConn->setIconText("Delete");
-    tree_->addActions({sql, er, backupAct, exportAct, importAct, setIcon, selectAll, dropAct, dropDb_, refresh, disconnect,
-                       editConn, delConn});
+    tree_->addActions({sql, er, backupAct, exportAct, importAct, setIcon, selectAll, dropAct, newDb_, dropDb_, refresh,
+                       disconnect, editConn, delConn});
 
     connect(newConn, &QAction::triggered, this, &MainWindow::newConnection);
     connect(editConn, &QAction::triggered, this, &MainWindow::editConnection);
@@ -1061,6 +1066,73 @@ void MainWindow::runDrop(const QString& conn, const QString& db, const QPersiste
             box.setDefaultButton(QMessageBox::Cancel);
             box.exec();
             if (box.clickedButton() == retry) runDrop(conn, db, dbIdx, targets, true);
+        });
+}
+
+void MainWindow::createDatabase() {
+    auto* item = selectedItem();
+    if (!item) return;
+    QString conn = item->data(RoleConn).toString();
+
+    QDialog dlg(this);
+    dlg.setWindowTitle("New Database");
+    dlg.setMinimumWidth(360);
+    auto* name = new QLineEdit;
+    auto* owner = new QLineEdit;
+    owner->setPlaceholderText(qs(configs_.at(conn).username).isEmpty() ? "current user"
+                                                                       : qs(configs_.at(conn).username));
+    auto* encoding = new QComboBox;
+    encoding->addItems({"(server default)", "UTF8", "SQL_ASCII", "LATIN1", "WIN874"});
+    auto* tmpl = new QComboBox;
+    tmpl->addItems({"template1", "template0"});
+    tmpl->setToolTip("template0: a clean copy, needed for an encoding / locale other than template1's");
+    // a non-default encoding usually differs from template1's, which PostgreSQL rejects
+    connect(encoding, &QComboBox::currentIndexChanged, tmpl, [tmpl](int i) { if (i > 0) tmpl->setCurrentIndex(1); });
+    auto* form = new QFormLayout;
+    form->addRow("Name", name);
+    form->addRow("Owner", owner);
+    form->addRow("Encoding", encoding);
+    form->addRow("Template", tmpl);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    buttons->button(QDialogButtonBox::Ok)->setText("Create");
+    buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
+    connect(name, &QLineEdit::textChanged, &dlg,
+            [buttons](const QString& t) { buttons->button(QDialogButtonBox::Ok)->setEnabled(!t.trimmed().isEmpty()); });
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    auto* layout = new QVBoxLayout(&dlg);
+    layout->addLayout(form);
+    layout->addWidget(buttons);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    QString db = name->text().trimmed();
+    std::string stmt = "CREATE DATABASE " + PostgreSQL::quoteIdent(db.toStdString());
+    if (!owner->text().trimmed().isEmpty())
+        stmt += " OWNER " + PostgreSQL::quoteIdent(owner->text().trimmed().toStdString());
+    if (encoding->currentIndex() > 0) stmt += " ENCODING '" + encoding->currentText().toStdString() + "'"; // fixed list
+    stmt += " TEMPLATE " + tmpl->currentText().toStdString();
+
+    // via template1, like createdb: the connection's own database may not exist yet, and "postgres" may not either.
+    // Closed right after: an idle session on template1 blocks everyone else's CREATE DATABASE.
+    statusBar()->showMessage("Creating database " + db + "…");
+    auto viaKey = conn + "/template1";
+    pgSession(conn, "template1").run(
+        this, [stmt](PostgreSQL& pg) { pg.execute(stmt); },
+        [=, this] {
+            pgSessions_.erase(viaKey);
+            statusBar()->showMessage("Created database " + db, 5000);
+            for (int r = 0; r < model_->rowCount(); ++r)
+                if (auto* c = model_->item(r); c->data(RoleConn).toString() == conn) {
+                    if (tree_->rootIndex().parent() == c->index()) leaveDatabase(); // re-list its databases
+                    resetChildren(c);
+                    if (tree_->isExpanded(c->index())) loadChildren(c);
+                    else tree_->expand(c->index()); // expanded() loads it
+                }
+        },
+        [=, this](const QString& msg) {
+            pgSessions_.erase(viaKey);
+            statusBar()->clearMessage();
+            QMessageBox::warning(this, "Create failed", msg);
         });
 }
 
