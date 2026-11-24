@@ -556,10 +556,12 @@ void MainWindow::openErDiagram() {
                 std::string only = schema.toStdString();
                 std::erase_if(s.tables, [&](auto& t) { return t.schema != only; });
             }
-            int i = tabs_->addTab(makeErDiagram(s, table), QString("ER · %1 · %2")
+            auto* er = makeErDiagram(s, table);
+            int i = tabs_->addTab(er, QString("ER · %1 · %2")
                                                                .arg(qs(configs_.at(conn).name),
                                                                     schema.isEmpty() ? db : db + "." + schema));
             tabs_->setCurrentIndex(i);
+            er->setFocus(); // so ⌘F reaches its find bar
             statusBar()->clearMessage();
         },
         [this](const QString& msg) { statusBar()->showMessage("ER diagram: " + msg, 5000); });

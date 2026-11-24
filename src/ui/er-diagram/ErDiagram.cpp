@@ -1,5 +1,6 @@
 #include "ErDiagram.h"
 
+#include <QAction>
 #include <QApplication>
 #include <QFontMetrics>
 #include <QGraphicsEllipseItem>
@@ -8,6 +9,7 @@
 #include <QGraphicsScene>
 #include <QGraphicsSimpleTextItem>
 #include <QGraphicsView>
+#include <QLineEdit>
 #include <QNativeGestureEvent>
 #include <QPainterPath>
 #include <QTimer>
@@ -16,6 +18,7 @@
 #include <cmath>
 #include <functional>
 #include <map>
+#include <memory>
 #include <set>
 
 namespace {
@@ -28,6 +31,8 @@ class Edge;
 class Box : public QGraphicsRectItem {
 public:
     std::vector<Edge*> edges;
+    QGraphicsSimpleTextItem* titleItem;
+    std::vector<QGraphicsSimpleTextItem*> colItems;
 
     Box(const SchemaInfo::Table& t, const QString& title, const std::set<std::string>& fkCols, const QPalette& pal) {
         setFlags(ItemIsMovable | ItemIsSelectable | ItemSendsGeometryChanges);
@@ -48,10 +53,10 @@ public:
         auto* header = new QGraphicsRectItem(0, 0, w, kHeaderH, this);
         header->setBrush(pal.highlight());
         header->setPen(Qt::NoPen);
-        auto* name = new QGraphicsSimpleTextItem(title, header);
-        name->setFont(bold);
-        name->setBrush(pal.highlightedText());
-        name->setPos(kPad, (kHeaderH - fmb.height()) / 2);
+        titleItem = new QGraphicsSimpleTextItem(title, header);
+        titleItem->setFont(bold);
+        titleItem->setBrush(pal.highlightedText());
+        titleItem->setPos(kPad, (kHeaderH - fmb.height()) / 2);
 
         for (size_t i = 0; i < t.columns.size(); ++i) {
             qreal y = kHeaderH + qreal(i) * kRowH + (kRowH - fm.height()) / 2 + 2;
@@ -64,6 +69,7 @@ public:
             auto* col = new QGraphicsSimpleTextItem(QString::fromStdString(t.columns[i]), this);
             col->setBrush(pal.text());
             col->setPos(kPad + gutter, y);
+            colItems.push_back(col);
             if (i < t.types.size()) {
                 QString type = QString::fromStdString(t.types[i]);
                 auto* ty = new QGraphicsSimpleTextItem(type, this);
@@ -237,6 +243,69 @@ QWidget* makeErDiagram(const SchemaInfo& schema, const QString& focusTable) {
         scene->addItem(new Edge(boxes[l.from], fromRow, boxes[l.to], toRow, edgeColor));
     }
     scene->setSceneRect(scene->itemsBoundingRect().adjusted(-200, -200, 200, 200));
+
+    // ⌘F: find a table / column by name; ↵ next, ⇧↵ previous, Esc close
+    auto* find = new QLineEdit(view);
+    find->setPlaceholderText("Find table / column — ↵ next, ⇧↵ prev, Esc close");
+    find->setClearButtonEnabled(true);
+    find->resize(340, find->sizeHint().height());
+    find->move(8, 8);
+    find->hide();
+    struct Hit { Box* box; int row; }; // row -1 = table name
+    auto hits = std::make_shared<std::vector<Hit>>();
+    auto cur = std::make_shared<int>(-1);
+    auto mark = [pal](QGraphicsSimpleTextItem* item, bool on, bool isCol) {
+        QFont f = item->font();
+        f.setUnderline(on);
+        item->setFont(f);
+        if (isCol) item->setBrush(on ? pal.link() : pal.text());
+    };
+    auto go = [view, scene, hits, cur](int step) {
+        if (hits->empty()) return;
+        int n = int(hits->size());
+        *cur = ((*cur + step) % n + n) % n;
+        auto [box, row] = (*hits)[*cur];
+        scene->clearSelection();
+        box->setSelected(true);
+        view->centerOn(box->mapToScene(box->rect().width() / 2, box->rowY(row)));
+    };
+    QObject::connect(find, &QLineEdit::textChanged, view, [=](const QString& text) {
+        hits->clear();
+        *cur = -1;
+        for (auto* box : boxes) {
+            bool t = !text.isEmpty() && box->titleItem->text().contains(text, Qt::CaseInsensitive);
+            mark(box->titleItem, t, false);
+            if (t) hits->push_back({box, -1});
+            for (size_t i = 0; i < box->colItems.size(); ++i) {
+                bool c = !text.isEmpty() && box->colItems[i]->text().contains(text, Qt::CaseInsensitive);
+                mark(box->colItems[i], c, true);
+                if (c) hits->push_back({box, int(i)});
+            }
+        }
+        find->setToolTip(text.isEmpty() ? QString() : QString("%1 match(es)").arg(hits->size()));
+        find->setStyleSheet(!text.isEmpty() && hits->empty() ? "color: #d33" : "");
+        go(1);
+    });
+    QObject::connect(find, &QLineEdit::returnPressed, view,
+                     [go] { go(QApplication::keyboardModifiers() & Qt::ShiftModifier ? -1 : 1); });
+    auto* open = new QAction(view);
+    open->setShortcut(QKeySequence::Find);
+    open->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+    QObject::connect(open, &QAction::triggered, find, [find] {
+        find->show();
+        find->setFocus();
+        find->selectAll();
+    });
+    view->addAction(open);
+    auto* close = new QAction(find);
+    close->setShortcut(Qt::Key_Escape);
+    close->setShortcutContext(Qt::WidgetShortcut);
+    QObject::connect(close, &QAction::triggered, find, [find, view] {
+        find->clear();
+        find->hide();
+        view->setFocus();
+    });
+    find->addAction(close);
 
     QTimer::singleShot(0, view, [view, scene, focus] { // needs the real viewport size
         if (focus) {
