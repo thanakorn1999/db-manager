@@ -95,6 +95,14 @@ static void completerTests() {
            "SELECT * FROM (SELECT * FROM orders ORDER BY id) x ORDER BY total DESC;");
     assert(o("SELECT 1; SELECT 2 AS total -- c", 2, "ASC", "") == "SELECT 1; SELECT 2 AS total ORDER BY total -- c");
     assert(o("DELETE FROM orders RETURNING *", 2, "ASC").empty());
+    // FROM *: one UNION ALL part per table, * in WHERE = the row as text, the tail kept
+    SchemaInfo two;
+    two.tables = {{"public", "users", {"id"}}, {"sales", "Inv", {"id"}}};
+    assert(SqlCompleter::searchAllTables("SELECT * FROM users", two).empty());
+    assert(SqlCompleter::searchAllTables("SELECT 1; SELECT * FROM * WHERE *::text LIKE '%X*%' OR * LIKE 'a' LIMIT 5;", two) ==
+           "SELECT 1; SELECT 'users' AS \"table\", to_jsonb(\"*\") AS \"row\" FROM users \"*\" WHERE \"*\"::text::text LIKE '%X*%' OR \"*\"::text LIKE 'a'"
+           "\nUNION ALL SELECT 'sales.\"Inv\"' AS \"table\", to_jsonb(\"*\") AS \"row\" FROM sales.\"Inv\" \"*\" WHERE \"*\"::text::text LIKE '%X*%' OR \"*\"::text LIKE 'a'"
+           "\nLIMIT 5;");
     r = comp("SELECT * FROM mix", s);
     assert(r.items.size() == 1 && r.items[0].label == "\"Mixed Case\"");
 

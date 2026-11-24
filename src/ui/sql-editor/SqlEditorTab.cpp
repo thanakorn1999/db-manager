@@ -649,9 +649,11 @@ void SqlEditorTab::execute(const QString& sql, const QString& note) {
     setRunning(true);
     status_->setText("Running…");
     timer_.start();
+    std::string s = sql.toStdString();
+    if (auto all = SqlCompleter::searchAllTables(s, schema_); !all.empty()) s = all; // FROM *
     session_.run(
         this,
-        [s = sql.toStdString()](PostgreSQL& pg) {
+        [s](PostgreSQL& pg) {
             auto rs = pg.execute(s);
             EditTarget t;
             try {

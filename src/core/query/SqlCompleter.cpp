@@ -719,6 +719,35 @@ std::string sortBy(const std::string& sql, const SchemaInfo& schema, const std::
     return clause.empty() ? sql : insertBefore(sql, toks, i, clause);
 }
 
+// ponytail: views are searched too (rows may show twice); one table the user can't read fails the whole union
+std::string searchAllTables(const std::string& sql, const SchemaInfo& schema) {
+    std::vector<Token> toks;
+    for (auto& t : tokenize(sql))
+        if (t.kind != Token::Comment) toks.push_back(t);
+    size_t from = 0;
+    while (from + 1 < toks.size() && !(toks[from].is("FROM") && toks[from + 1].punct('*'))) ++from;
+    if (from + 1 >= toks.size()) return "";
+    size_t start = from;
+    while (start > 0 && !toks[start - 1].punct(';')) --start;
+    size_t i = from + 2;
+    bool where = i < toks.size() && toks[i].is("WHERE");
+    size_t end = clauseEnd(toks, where ? i + 1 : i);
+    std::string cond; // the WHERE with each * as the row's text
+    for (size_t k = i + 1; where && k < end; ++k) {
+        if (k > i + 1) cond += sql.substr(toks[k - 1].end, toks[k].pos - toks[k - 1].end);
+        cond += toks[k].punct('*') ? "\"*\"::text" : sql.substr(toks[k].pos, toks[k].end - toks[k].pos);
+    }
+    std::string out;
+    for (auto& t : schema.tables) {
+        std::string name = tableName(t.schema, t.name);
+        out += (out.empty() ? "" : "\nUNION ALL ") + std::string("SELECT ") + literal(name) +
+               " AS \"table\", to_jsonb(\"*\") AS \"row\" FROM " + name + " \"*\"" +
+               (cond.empty() ? "" : " WHERE " + cond);
+    }
+    if (out.empty()) out = "SELECT NULL::text AS \"table\", NULL::jsonb AS \"row\" WHERE false";
+    return sql.substr(0, toks[start].pos) + out + (end < toks.size() ? "\n" + sql.substr(toks[end].pos) : "");
+}
+
 std::vector<std::pair<size_t, size_t>> unknownNames(const std::string& sql, const SchemaInfo& schema) {
     std::vector<std::pair<size_t, size_t>> out;
     if (schema.tables.empty()) return out;
