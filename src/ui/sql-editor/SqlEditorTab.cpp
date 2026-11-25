@@ -222,8 +222,41 @@ SqlEditorTab::SqlEditorTab(const ConnectionConfig& cfg, const QString& sql, bool
     auto* editor = new SqlTextEdit(sql);
     editor_ = editor;
     editor_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
-    editor_->setPlaceholderText("SQL… (⌘↵ run, ⌘. cancel; select text to run only the selection)");
+    editor_->setPlaceholderText("SQL… (⌘↵ run, ⌘. cancel, ⌘/ comment; select text to run only the selection)");
     new SqlHighlighter(editor_->document());
+    // ⌘/: "-- " on every line of the selection, or off when they all have one
+    auto* comment = new QAction(editor_);
+    comment->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Slash));
+    comment->setShortcutContext(Qt::WidgetShortcut);
+    editor_->addAction(comment);
+    connect(comment, &QAction::triggered, this, [this] {
+        auto c = editor_->textCursor();
+        auto* doc = editor_->document();
+        int first = doc->findBlock(c.selectionStart()).blockNumber();
+        int last = doc->findBlock(c.selectionEnd()).blockNumber();
+        if (last > first && c.selectionEnd() == doc->findBlockByNumber(last).position()) --last; // ends at a line start
+        static const QRegularExpression commented("^\\s*--"), blank("^\\s*$");
+        bool remove = true;
+        for (int b = first; b <= last; ++b) {
+            QString t = doc->findBlockByNumber(b).text();
+            if (!blank.match(t).hasMatch() && !commented.match(t).hasMatch()) remove = false;
+        }
+        c.beginEditBlock(); // one undo step
+        for (int b = first; b <= last; ++b) {
+            auto block = doc->findBlockByNumber(b);
+            QTextCursor e(block);
+            if (!remove) {
+                e.insertText("-- ");
+                continue;
+            }
+            int at = block.text().indexOf("--");
+            if (at < 0) continue; // blank line
+            e.setPosition(block.position() + at);
+            e.setPosition(block.position() + at + (block.text().mid(at, 3) == "-- " ? 3 : 2), QTextCursor::KeepAnchor);
+            e.removeSelectedText();
+        }
+        c.endEditBlock();
+    });
 
     model_ = new ResultModel(this);
     table_ = new QTableView;

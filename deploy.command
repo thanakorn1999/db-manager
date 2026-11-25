@@ -18,7 +18,21 @@ rm -rf "$APP"
 cp -R build-release/db-manager.app "$APP"
 # the QtVirtualKeyboard "Cannot resolve rpath" errors are for a plugin this app doesn't use
 "$B/opt/qt/bin/macdeployqt" "$APP" -libpath="$B/lib"
-codesign --force --deep --sign - "$APP"
+# Sign with a stable self-signed identity, not ad-hoc (-): the keychain ties saved passwords to the
+# app's signature, and an ad-hoc one changes every build, so macOS asked for each password again.
+# Created once in the login keychain; click "Always Allow" on the next prompt and it stays allowed.
+SIGN_ID="DB Manager Dev"
+if ! security find-certificate -c "$SIGN_ID" >/dev/null 2>&1; then
+    T=$(mktemp -d)
+    # /usr/bin/openssl (LibreSSL): its .p12 imports; Homebrew OpenSSL 3+ needs -legacy
+    /usr/bin/openssl req -x509 -newkey rsa:2048 -nodes -days 36500 -subj "/CN=$SIGN_ID" \
+        -keyout "$T/k.pem" -out "$T/c.pem" \
+        -addext "keyUsage=critical,digitalSignature" -addext "extendedKeyUsage=critical,codeSigning"
+    /usr/bin/openssl pkcs12 -export -inkey "$T/k.pem" -in "$T/c.pem" -out "$T/id.p12" -passout pass:x
+    security import "$T/id.p12" -P x -T /usr/bin/codesign
+    rm -rf "$T"
+fi
+codesign --force --deep --sign "$SIGN_ID" "$APP"
 
 # quit the running copy; it asks first if a grid has unsaved edits, and Cancel stops the install
 osascript -e 'quit app "DB Manager"' 2>/dev/null || true
